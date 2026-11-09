@@ -69,7 +69,7 @@ flowchart LR
       appts -.->|type only| llm
       tasks & developers & skills --> bshared["db, errors, validation"]
     end
-    subgraph fe["frontend/src (planned)"]
+    subgraph fe["frontend/src"]
       app["app/"] --> list["features/task-list"] & create["features/task-create"]
       list & create --> fshared["api, components, lib"]
     end
@@ -216,7 +216,7 @@ type ErrorBody = { error: { code: string; message: string; requestId: string; de
 
 Every id in a path or a body must be a well-formed UUID, checked by zod. So `/api/tasks/abc` gets `400 VALIDATION_ERROR` instead of reaching SQL, where PostgreSQL would reject the cast and the client would get a 500. `skillIds` are de-duplicated before use, so a repeated id cannot break the `task_skill` primary key.
 
-Separate endpoints for status, assignee and skills keep each one's validation and errors simple. A `400` is invalid input: a malformed body or id, an id that does not exist (skill or developer), or a tree that breaks a create-time rule. A `409` breaks a rule that depends on the stored task. Checks run in this order: request shape, then the task (`404`), then referenced ids (`400`), then rules (`409`). The `message` names the rule and the facts behind it, for example "Bob cannot take 'Avatar UI': it requires Frontend, which Bob lacks." On create, `details.path` points at the node, because titles need not be unique.
+Separate endpoints for status, assignee and skills keep each one's validation and errors simple. A `400` is invalid input: a malformed body or id, an id that does not exist (skill or developer), or a tree that breaks a create-time rule. A `409` breaks a rule that depends on the stored task. Checks run in this order: request shape, then the task (`404`), then referenced ids (`400`), then rules (`409`). The `message` names the rule and the facts behind it, for example "Bob cannot take 'Avatar UI': it requires Frontend, and Bob lacks Frontend." On create, `details.path` points at the node, because titles need not be unique.
 
 The form hides "Add Subtask" at `maxDepth`, read from `GET /api/meta`, so the nesting limit is one setting in `backend/src/limits.json` ([Subtasks](requirement.md#subtasks)).
 
@@ -417,7 +417,7 @@ The default comes from four live Saves with `gemini-3.5-flash-lite`. The first c
 ## Frontend structure
 
 The frontend is a React SPA with two pages, the Task List and Task Creation. Its components, page wireframes and error states are in [frontend.md](frontend.md).
-It repeats the assignment and Done rules only to hide or disable choices the backend would reject. The backend is the guard, and its answer is always what the page shows.
+It repeats a few backend checks (the assignment rule, non-empty titles, at least one skill on a skill edit, and the depth and size limits) only to hide, disable or clear choices the backend would reject. The backend is the guard, and its answer is always what the page shows.
 
 ## Observability
 
@@ -478,7 +478,7 @@ Rules for what never gets logged:
 | End to end | Over HTTP against the built image and a database loaded by `db/init`: seeded developers; create a nested tree; assignment rejected then accepted; Done rejected then allowed; reopening a subtask reopens its Done ancestors; skill edit rejected then applied with the flag; a task without skills saved as `FAILED` | `scripts/e2e.sh` starts a throwaway compose project, runs `test/e2e.test.ts`, and removes it. `npm test` skips the file |
 | Tree lock | Deterministic, on a parent with one Done child. A test client opens a transaction and takes `FOR UPDATE` on the root. It then fires "parent → Done" and "child → To-do", which touch different rows, and checks both wait on a lock (`pg_stat_activity.wait_event_type = 'Lock'`). After the client commits, the test checks the parent never ends Done above an unfinished child. Only the root lock serialises these two, so removing it fails the test. | Real PostgreSQL. A timing-based test would pass with the lock removed |
 | LLM handling | The mapping and retry rules above: unknown names, missing, duplicate and out-of-range indexes, empty list, blocked prompt, non-`STOP`, bad JSON, timeout then retry, 400/401/403/404 not retried, no key. Fields are pinned against hand-written fixtures | The fake `SkillIdentifier` plus a stubbed `fetch` for the Gemini adapter. No network |
-| Frontend | `draft.ts`: depth limit, add and remove, assignee cleared on a skill change. `lib/rules.ts`: qualifying developers, Done allowed, progress count. `SkillEditor`: a `409 SKILL_EDIT_BREAKS_ASSIGNMENT` opens the dialog, Confirm resends with the flag, and Cancel sends nothing. | Vitest; the component test stubs the API client |
+| Frontend | Pure logic: `draft.ts` (depth and tree-size limits, add and remove, assignee cleared on a skill change) and `lib/rules.ts` (qualifying developers, progress count). Component tests cover: the modals' Esc, focus return and button order (`Modal`, `ConfirmDialog`); the confirm flow and inert Cancel while saving (`SkillEditor`); Done always selectable and the picked value shown while saving (`TaskRow`); banners, page states, the highlight, and row errors that survive a collapse (`TaskListPage`); Save gating, the failure outline kept by node, and Cancel (`TaskCreatePage`); a change staying pending until the list refetches (`queries`). The backdrop, colours and layout are checked in a browser only | Vitest with jsdom; the component tests stub the API client |
 
 ## Risks and assumptions
 

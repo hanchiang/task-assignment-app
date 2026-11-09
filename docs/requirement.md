@@ -153,7 +153,7 @@ The brief's examples of the expected behaviour:
 - **Decision:** a user can edit any task's skills from the Task List page, to correct a wrong LLM answer or to classify a failed task.
   For example, "Write onboarding docs" matches neither Frontend nor Backend, so a person has to pick its skills.
 - **Decision:** an edit must leave at least one skill.
-- **Decision:** if the current assignee lacks a new skill, the user is asked to confirm before saving, for example "Alice lacks Backend. Save and unassign Alice?" On confirm, the skills are saved and the assignee is cleared in one step. Without that confirmation the edit is rejected, so the assignment rule always holds and no assignment is lost unseen. This trades a strict rejection for less friction: correcting a label takes one deliberate action, not unassign, edit and reassign.
+- **Decision:** if the current assignee lacks a new skill, the user is asked to confirm before saving, for example "Alice lacks Backend. Saving will unassign Alice from this task." On confirm, the skills are saved and the assignee is cleared in one step. Without that confirmation the edit is rejected, so the assignment rule always holds and no assignment is lost unseen. This trades a strict rejection for less friction: correcting a label takes one deliberate action, not unassign, edit and reassign.
 - **Decision:** the tool never keeps an assignee who lacks a required skill, even if the user would accept it. The brief makes "a task can only be assigned to a developer with the skills it requires" a hard rule (parts 1.1 and 2.1). The user stays in control of which skills a task needs and who takes it next; the tool only refuses to save a forbidden state.
 
 ## Where the rules are enforced
@@ -173,7 +173,7 @@ The app is a single-page application with two pages.
 - Lists all existing tasks with their relevant attributes. A task can be assigned to a developer with the required skills, and its status can be updated.
 - **Decision:** subtasks are indented under their parent, and each parent can be expanded or collapsed.
 - **Decision:** every row, top-level or subtask, has its own status and assignee dropdowns. The assignee dropdown lists only qualifying developers, plus an empty choice to unassign.
-- **Decision:** the Done choice is disabled while a task has unfinished subtasks, and the row says why. A parent row shows subtask progress, for example "2/3 done".
+- **Decision:** Done can be picked on any row. If the task has unfinished subtasks, the backend refuses the change and the row shows its message, which names those subtasks. A parent row shows subtask progress, for example "2/3 done".
 - **Decision:** each task shows where its skills came from: set by a user, identified by the LLM, or failed. A failed task is labelled "Skills needed", not "Failed", so it is not mistaken for a status, and it prompts the user to pick its skills.
 
 The brief's wireframe, titled "Tasks", copied as text. `[To-do ▾]` and `[Alice ▾]` are dropdowns, and `[ ▾]` is an empty one. The brief does not explain the "…" column; this solution reads it as room for more columns.

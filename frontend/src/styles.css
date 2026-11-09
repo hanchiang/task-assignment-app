@@ -1,0 +1,296 @@
+/* Plain CSS, no component library. Palette: neutral greys, one blue accent, red for errors. */
+:root {
+  --text: #1f2933;
+  --muted: #667085;
+  --line: #d9dee5;
+  --surface: #f6f8fa;
+  --accent: #1d5fd1;
+  --error: #b42318;
+  --error-bg: #fdecea;
+  --info-bg: #e8f0fe;
+  --indent: 24px;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--text);
+}
+
+body {
+  margin: 0;
+  line-height: 1.4;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0;
+}
+
+button,
+.button,
+select,
+input[type="text"] {
+  font: inherit;
+}
+
+button,
+.button {
+  padding: 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: white;
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.icon-button {
+  border: none;
+  background: none;
+  padding: 0 6px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+.error-text {
+  color: var(--error);
+}
+
+/* Layout */
+.top-bar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 10px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.app-name {
+  font-weight: 600;
+}
+
+.top-bar nav {
+  display: flex;
+  gap: 16px;
+}
+
+.top-bar a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.top-bar a.active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.page-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+/* Banners */
+.notice {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border-radius: 4px;
+}
+
+.notice-info {
+  background: var(--info-bg);
+}
+
+.notice-error {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+/* Task list. The table scrolls sideways on a narrow screen instead of squeezing its columns. */
+.table-scroll {
+  overflow-x: auto;
+}
+
+.task-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.task-table th,
+.task-table td {
+  text-align: left;
+  padding: 8px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.cell-task {
+  padding-left: calc(var(--depth, 0) * var(--indent) + 8px);
+  min-width: 280px;
+}
+
+.toggle {
+  display: inline-block;
+  width: 24px;
+}
+
+.progress {
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+.task-title {
+  overflow-wrap: anywhere;
+}
+
+.is-done .task-title {
+  color: var(--muted);
+}
+
+.skills-needed {
+  color: var(--error);
+}
+
+/* The error line sits under the title: the row's indent, the cell's 8px padding, and 24px for the
+   expand toggle that precedes the title. */
+.row-error td {
+  padding-top: 2px;
+  padding-left: calc(var(--depth, 0) * var(--indent) + 8px + 24px);
+  color: var(--error);
+}
+
+/* The new tree: pale yellow that fades out over 3 seconds. */
+.is-highlighted {
+  animation: highlight-fade 3s ease-out;
+}
+
+@keyframes highlight-fade {
+  from {
+    background: #fff3b0;
+  }
+  to {
+    background: transparent;
+  }
+}
+
+/* Modals */
+.modal {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 20px 24px;
+  min-width: 320px;
+  max-width: 90vw;
+}
+
+.modal::backdrop {
+  background: rgb(0 0 0 / 0.4);
+}
+
+.modal h2 {
+  font-size: 1.1rem;
+  margin: 0 0 12px;
+  overflow-wrap: anywhere;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.skill-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  border: none;
+  padding: 0;
+  margin: 0;
+}
+
+.skill-options label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Task creation */
+.draft-node {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  margin-top: 12px;
+}
+
+.draft-node.has-error {
+  outline: 2px solid var(--error);
+}
+
+.draft-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 24px;
+  margin-bottom: 8px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.9em;
+}
+
+.field input[type="text"] {
+  min-width: 360px;
+  max-width: 100%;
+}
+
+.draft-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.draft-node .draft-node {
+  margin-left: var(--indent);
+}
+
+/* A saving control stays focusable (aria-disabled), so it needs its own disabled look. */
+select[aria-disabled="true"],
+button[aria-disabled="true"],
+.button[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: progress;
+}
