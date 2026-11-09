@@ -35,6 +35,7 @@ Open http://localhost:8080. The database starts with four developers (Alice, Bob
 | Goal | Command |
 | --- | --- |
 | Check the API is up | `curl localhost:3000/api/health` (or your `API_PORT`) returns `{"ok":true}` |
+| Inspect the database | `psql postgres://taskapp:taskapp@127.0.0.1:15432/taskapp` (or your `DB_PORT` and `POSTGRES_PASSWORD`). Without a local psql: `docker compose exec db psql -U taskapp taskapp`. Use it to read only: a write here skips the backend's rules, such as the allowed statuses ([requirement.md → Out of scope](docs/requirement.md#out-of-scope)). |
 | Read the API's logs | `docker compose logs api` |
 | Stop | `docker compose down` |
 | Reset all data to the seed | `docker compose down -v`, then start again. This deletes every task. |
@@ -52,7 +53,8 @@ Settings come from a `.env` file next to `docker-compose.yml`. Copy `.env.exampl
 | `LLM_TIMEOUT_MS` | Time limit for each Gemini attempt; a failed attempt is retried once, unless it was an HTTP 400, 401, 403 or 404 | `20000` (default) | Not a whole number from 1 to 25000: the API refuses to start. The cap keeps two attempts inside nginx's 60 s proxy timeout. |
 | `LOG_LEVEL` | API log level | `info` (default) | Not a pino level: the API refuses to start. |
 | `WEB_PORT` | Host port for the web app | `8080` (default) | Port taken: the `web` container fails to start. |
-| `API_PORT` | Host port for direct API access | `3000` (default) | Port taken: the `api` container fails to start. |
+| `API_PORT` | Host port for direct API access | `3000` (default) | Port taken: the `api` container fails to start, so the web app does not start either. |
+| `DB_PORT` | Host port for a database client | `15432` (default) | Port taken: the `db` container fails to start, so the API and web app do not start either. |
 | `POSTGRES_PASSWORD` | Database password, applied when the data volume is first created | `taskapp` (default) | Use letters and digits only, because it goes unencoded into the API's database URL. Changed after the first start, or holding a character that breaks a URL (such as `#`, `/`, `?` or `%`): the API cannot connect, refuses to start, and Compose keeps restarting it (`docker compose logs api` shows why). To change it, run `docker compose down -v`, which deletes all data. |
 
 Use a Gemini key from a Google Cloud project with no billing account, so it stays on the free tier and cannot be charged. The free tier allows roughly 10 to 15 requests a minute; past that, Saves show "Skills needed" until the minute passes.
@@ -193,7 +195,7 @@ npm test && npm run typecheck && npm run lint
 scripts/e2e.sh
 ```
 
-It needs `docker compose` (v2) and `curl`. It builds the API and web images and starts a separate stack (compose project `taskapp-e2e-3100`, API on port 3100, web on port 8180). It checks nginx's routing and cache headers, runs the flows through nginx, then deletes that stack's containers, data and built images. The app's own stack and data are not touched. It runs with no Gemini key, even when `.env` has one, so it never calls Gemini. Set `E2E_API_PORT` or `E2E_WEB_PORT` if a port is taken; the project name follows the API port.
+It needs `docker compose` (v2) and `curl`. It builds the API and web images and starts a separate stack (compose project `taskapp-e2e-3100`, API on port 3100, web on port 8180, database on port 5532). It checks nginx's routing and cache headers, runs the flows through nginx, then deletes that stack's containers, data and built images. The app's own stack and data are not touched. It runs with no Gemini key, even when `.env` has one, so it never calls Gemini. Set `E2E_API_PORT`, `E2E_WEB_PORT` or `E2E_DB_PORT` if a port is taken; the project name follows the API port.
 
 ## Changing the code
 

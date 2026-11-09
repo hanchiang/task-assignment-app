@@ -250,7 +250,7 @@ Listing tasks, developers and skills, and updating a task's skills, go beyond th
 - Links between tasks, such as "related to".
 - Adding, renaming or removing developers or skills themselves. Choosing a task's skills is in scope.
 - Deployment beyond docker-compose.
-- Guarding against direct database edits. The app is the only writer, so business rules such as the allowed statuses are checked only in the backend.
+- Guarding against direct database edits, including through the database port published for inspection. The app is the only writer, so business rules such as the allowed statuses are checked only in the backend.
 
 ## Possible follow-ups
 

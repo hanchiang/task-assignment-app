@@ -14,6 +14,10 @@ services:
     volumes:
       - ./db/init:/docker-entrypoint-initdb.d:ro
       - db-data:/var/lib/postgresql/data
+    # Published on localhost only, for inspecting data with a database client: user and database taskapp.
+    # Not 5432, so a local PostgreSQL does not stop the app from starting.
+    ports:
+      - "127.0.0.1:${DB_PORT:-15432}:5432"
     healthcheck:
       # -h 127.0.0.1: during init the image runs a socket-only server, which a bare pg_isready reports as ready.
       test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "taskapp", "-d", "taskapp"]
