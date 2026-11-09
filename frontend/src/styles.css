@@ -147,7 +147,8 @@ button:disabled {
   border-bottom: 1px solid var(--line);
 }
 
-.cell-task {
+/* Two classes, so this outranks the `.task-table td` padding above; a bare .cell-task loses and drops the indent. */
+.task-table .cell-task {
   padding-left: calc(var(--depth, 0) * var(--indent) + 8px);
   min-width: 280px;
 }

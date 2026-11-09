@@ -19,6 +19,20 @@ This README is the entry point and summarises each of them.
 
 Out of scope: login, deleting tasks, editing titles, and adding developers or skills. The full list is in [docs/requirement.md → Out of scope](docs/requirement.md#out-of-scope).
 
+### What it looks like
+
+The Task List. "(LLM)" marks skills Gemini identified on Save. "Plan the team offsite" got no skill on Save, so it waits for a person to pick one.
+
+![Task List with a three-level task tree](docs/images/task-list.png)
+
+Changing a task's skills so that its assignee no longer qualifies asks before unassigning them.
+
+![Confirm dialog: Alice lacks Backend](docs/images/confirm-unassign.png)
+
+Task Creation saves a task and its subtasks in one go. The subtask has no skills, so Gemini will identify them on Save.
+
+![Task Creation form with one subtask](docs/images/create-task.png)
+
 ## Usage
 
 ### Start the app
