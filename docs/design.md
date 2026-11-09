@@ -388,7 +388,7 @@ Response fields read, from the [generateContent reference](https://aistudio.goog
 | `usageMetadata` (`promptTokenCount`, `candidatesTokenCount`, `thoughtsTokenCount`, `totalTokenCount`) | Logged token counts | documented only |
 | `error.status` (on HTTP errors) | Logged; the free-text `error.message` is not logged, because it can name the Cloud project | documented only |
 
-Cost: one call per Save that has skill-less tasks, and none otherwise.
+Cost: one call per Save that has skill-less tasks, two requests if the first attempt fails and is retried, and none otherwise.
 
 ### Free-tier quota
 
@@ -401,7 +401,7 @@ Cost: one call per Save that has skill-less tasks, and none otherwise.
 
 What that means here:
 
-- **Normal use is safe on the daily limit.** A session with 30 Saves uses at most 30 of about 500 requests. The automated tests stub `fetch` and never call Gemini.
+- **Normal use is safe on the daily limit.** A session with 30 Saves uses about 30 of about 500 requests, and at most 60 if every first attempt fails. The automated tests stub `fetch` and never call Gemini.
 - **The per-minute limit is the real risk.** Several people saving at once could exceed about 10 a minute. The immediate retry would likely hit the same 429, so those tasks save as "Skills needed". The app keeps working, and the README explains that state.
 - **Development use eats the same daily quota** if it shares the project. So a key that is shared comes from a **dedicated project** used for nothing else.
 - **Before a busy session, or before sharing the key,** read the real limits for that project in AI Studio's rate-limit page, and check that its usage today is low.
