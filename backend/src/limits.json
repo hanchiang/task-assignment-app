@@ -1,3 +1,4 @@
 {
-  "maxDepth": 3
+  "maxDepth": 3,
+  "maxTreeSize": 50
 }

@@ -12,7 +12,7 @@ How to read it:
 
 ## Overview
 
-The planned system has four parts: a React single-page app, a Node.js backend, a PostgreSQL database and an external LLM.
+The system has four parts: a React single-page app, a Node.js backend, a PostgreSQL database and an external LLM.
 
 ```mermaid
 flowchart LR
@@ -116,15 +116,15 @@ The database is seeded with these developers and skills. **Decision:** no tasks 
   For example, reopening "Avatar UI" while its parent "Profile update" is Done moves "Profile update" to In Progress.
 - **Decision:** a task gets its subtasks only when it is created. Adding a subtask later, or moving a task under another, is not supported.
 
-Together with two other decisions, that new tasks start as To-do (see Status) and that changes run in locked transactions (see Non-functional requirements), these rules mean a Done task never sits above unfinished work. That is why checking a task's direct subtasks is enough to enforce the Done rule at every level.
+Two other decisions support these rules: new tasks start as To-do (see Status), and changes run in locked transactions (see Non-functional requirements). Together they mean a Done task never sits above unfinished work. That is why checking a task's direct subtasks is enough to enforce the Done rule at every level.
 
 ### Skill identification
 
 - When a task or subtask is created without user-specified skills, the backend uses an LLM, through its API, to identify the skills from the task title. The user does not need to trigger this from the frontend.
 - **Decision:** this happens while the Save request is open. The backend sends every title in the tree that has no skills to the LLM in one call, then saves the whole tree with the results in one transaction. The LLM call finishes before that transaction opens, so no database lock is held while waiting.
-- **Decision:** creating a task never fails because of the LLM. Each attempt has a time limit, and an error or timeout is retried once, so Save waits at most twice the limit. If both attempts fail, those tasks are saved with their skills marked **failed**.
+- **Decision:** creating a task never fails because of the LLM. Each attempt has a time limit, and a timeout or a transient error is retried once, so Save waits at most twice the limit. An error that means the request or key is wrong is not retried. If both attempts fail, those tasks are saved with their skills marked **failed**.
 - **Decision:** the LLM may only choose from the existing skills, and any other name is ignored. A task the answer leaves out, or for which it names no existing skill, is marked failed.
-- **Decision:** the time limit is a fixed, configurable default of 10 seconds, not measured, to keep the first version simple. Each attempt's response time is logged. If the wait on Save becomes a bottleneck, identification can move to a background job (see Possible follow-ups).
+- **Decision:** the time limit defaults to 10 seconds and is set by configuration. It is a chosen default, not a measured one, to keep the first version simple. Each attempt's response time is logged. If the wait on Save becomes a bottleneck, identification can move to a background job (see Possible follow-ups).
 - **Decision:** the brief says skills "will be automatically generated". The failed state is a deliberate departure from that: when the LLM cannot help, a person picks the skills (see Editing skills).
 
 When a task is saved, its skills end up in one of three states:
@@ -189,6 +189,7 @@ The brief's wireframe, titled "Tasks", copied as text. `[To-do ▾]` and `[Alice
 - A new task is created by submitting a form. The user can specify the skills the task requires, and does not need to assign a developer.
 - The page supports creating subtasks and nested subtasks. Each subtask is an additional React component, rendered dynamically on the same page and indented one level further.
 - **Decision:** one form creates one top-level task and its subtasks, and saving stores the whole tree in one step. If any part is invalid, nothing is saved.
+- **Decision:** one tree holds at most **50 tasks**, the top-level task included. The backend rejects a larger tree, and the form stops offering "Add Subtask" at the limit. The limit keeps an oversized request from failing deep in the system; 50 is far above any realistic tree.
 - **Decision:** "Add Subtask" is hidden on a third-level task, to enforce the nesting limit. The brief's wireframe shows the button on every component, so this is a deliberate departure.
 - **Decision:** the assignee picker is enabled only after the user picks skills for that task, and lists only developers who have all of them. A task left to the LLM is assigned later, from the Task List page.
   The backend rejects a create request that names an assignee for a task without user-picked skills as invalid input, before calling the LLM.
@@ -232,9 +233,9 @@ Listing tasks, developers and skills, and updating a task's skills, go beyond th
 - **Runs in containers:** the entire solution, including all dependencies, is containerized with Docker. docker-compose runs a fully working app: frontend, backend, database with seed data, and LLM integration.
   **Decision:** the compose file works with both `docker-compose` and the newer `docker compose`.
 - **Decision, consistent under concurrent updates:** every status change, assignee change and skill change runs in one database transaction.
-  - It locks the tree's top-level task first, then the task being changed, then any other rows it checks. Every change in a tree takes the same first lock, so changes to one tree run one after another and cannot deadlock.
+  - It locks the tree's top-level task first, then the task being changed, then any developer it checks. Every change in a tree takes the same first lock, so changes to one tree run one after another and cannot deadlock.
   - A reopened subtask and the resetting of the Done tasks above it happen in the same transaction.
-  - So two concurrent requests cannot both pass their checks. For example, assigning Alice and adding Backend to the same task cannot both succeed.
+  - So two concurrent requests cannot both pass their checks. For example, marking "Profile update" Done while its subtask "Avatar UI" is reopened cannot leave a Done task above an unfinished one.
 - **Decision, secrets stay out of the repository:** the LLM API key is read from an environment file, and the repository carries only an example of that file.
 - **Decision, tested:** automated tests cover the assignment rule, the subtask rules, nesting depth and LLM response handling, including API tests against a real PostgreSQL database.
 - **Documented:** the README explains how to configure and run the app, the system design, the API, and the justification for the libraries and dependencies used.
@@ -260,13 +261,15 @@ Listing tasks, developers and skills, and updating a task's skills, go beyond th
 | Needs-reassignment view | List tasks that lost their assignee to a skill edit, so they get a new one. Needs the unassignment recorded, for example a reason column. A skill-mismatch report would always be empty, because the rule never lets a mismatch be saved. |
 | Deeper nesting | Raise the nesting limit beyond 3 levels. |
 | Background skill identification | Save returns at once, and a background job identifies skills afterwards. Worth it only if the LLM wait on Save becomes a bottleneck. |
+| Migration tool | Versioned schema changes, needed once the schema changes after release. |
+| Generated frontend types | Generate the frontend's API types from the backend's zod schemas, so they cannot drift. |
 
 ## Brief coverage
 
 | Brief part | Covered in |
 | --- | --- |
 | Notes: assumptions allowed | Assumptions |
-| Notes: version control, timeline, contacts, tooling | Not restated. These govern how the work is done, not what the app does. |
+| Process notes (version control, tooling) | Not product requirements. |
 | Background: best practices, code quality | Non-functional requirements |
 | Overview: stack, extra libraries | Stack |
 | 1.1 Entities and business logic | Domain model; Business rules; Where the rules are enforced |
@@ -282,4 +285,4 @@ Listing tasks, developers and skills, and updating a task's skills, go beyond th
 | 5.3 Automatic, backend-only trigger | Skill identification |
 | 6.1, 6.2 Docker and docker-compose | Non-functional requirements |
 | 7.1 README | Non-functional requirements |
-| 7.1 Public repository; 7.2 delivery | Not restated, for the same reason as the process notes. |
+| 7.1 Public repository; 7.2 | Not product requirements. |

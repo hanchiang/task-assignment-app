@@ -10,7 +10,7 @@ Requirement decisions are not repeated here. Each section links to the rule it i
 
 ## Overview
 
-Planned architecture (nothing is built yet):
+Architecture:
 
 ```mermaid
 flowchart LR
@@ -22,7 +22,7 @@ flowchart LR
 
 | Container | Image | Role |
 | --- | --- | --- |
-| `web` | `nginx:alpine` (built by `node:24-alpine`) | Serves the built SPA and proxies `/api` to `api`, so the browser sees one origin and no CORS is needed. `proxy_read_timeout 60s` is set explicitly, above the worst-case Save wait of 20 s ([time limit](#time-limit)). |
+| `web` | `nginx:alpine` (built by `node:24-alpine`) | Serves the built SPA and proxies `/api` to `api`, so the browser sees one origin and no CORS is needed. Unknown paths fall back to `index.html` (`try_files $uri /index.html`), so reloading `/tasks/new` works. `proxy_read_timeout 60s` is set explicitly, above the worst-case Save wait of 20 s ([time limit](#time-limit)). |
 | `api` | `node:24-alpine` | REST API, business rules, LLM client. Starts after `db` passes its health check. Its own health check calls `GET /api/health`. |
 | `db` | `postgres:17-alpine` | Schema and seed data, loaded from `db/init/*.sql` on first start. The health check is `pg_isready -h 127.0.0.1`: during init the image runs a socket-only server, which a bare `pg_isready` would report as ready. |
 
@@ -34,13 +34,13 @@ backend/src/
   app.ts            builds the Fastify instance (tests use app.inject, no network)
   server.ts         entry point: config, listen
   config.ts         env parsing with zod (DATABASE_URL, GEMINI_API_KEY, LLM_TIMEOUT_MS, ...)
-  limits.json       { maxDepth: 3 }; read by the API, and by the frontend via GET /api/meta
+  limits.json       { maxDepth: 3, maxTreeSize: 50 }; read by the API, and by the frontend via GET /api/meta
   db.ts             pg Pool + withTransaction(fn) + withTreeLock(taskId, fn): the only way to change an existing task
   errors.ts         AppError(code, httpStatus, message) + Fastify error handler
   tasks/            routes.ts, schemas.ts (zod), service.ts (transactions), rules.ts (pure), repo.ts (SQL)
   developers/       routes.ts, repo.ts
   skills/           routes.ts, repo.ts
-  llm/              skills.ts (SKILL_DEFINITIONS), skillIdentifier.ts (interface + result mapping), gemini.ts, fake.ts
+  llm/              prompt.json (system instruction + generationConfig), skillIdentifier.ts (interface + result mapping), gemini.ts, fake.ts
 backend/test/       rules.test.ts (unit), api.test.ts (real Postgres), llm.test.ts (response handling)
 frontend/src/       see Frontend structure
 scripts/            pre-commit (key guard; install once per clone)
@@ -108,7 +108,7 @@ CREATE TABLE task_skill (
 | `status` and `skill_source` are `text` with no `CHECK` | The requirement puts allowed values in the backend, so changing a rule needs no migration. The out-of-scope list accepts that a direct database edit is not guarded. |
 | `root_id` is stored | Every write locks the tree's top-level task first, and `root_id` names that row without walking up. `task_root_idx` serves `GET /api/tasks/:id`, which reads the whole tree by `root_id` and cuts out the subtree in memory. The value is immutable, because tasks never move ([Subtasks](requirement.md#subtasks)), so it cannot drift. |
 | No `depth` column | Depth is computed while nesting rows into the response, and nesting is checked on the request tree at create time. Depth is 1-based everywhere: a top-level task has depth 1. A node may have subtasks only while its depth is below `maxDepth`, and any node deeper than `maxDepth` gives `NESTING_TOO_DEEP`. Backend and frontend tests both check that a 3-level tree is accepted and a 4-level tree is rejected. |
-| Ids are UUIDv7, generated in the backend | Ids cannot be enumerated and do not reveal row counts. Their 48-bit millisecond timestamp prefix keeps the B-tree index nearly as compact as an integer key, unlike random UUIDv4. They do reveal each row's creation time, which is harmless for tasks. Generating them in the app means a whole tree's ids are known before any insert ([Inserting a tree](#inserting-a-tree)). Node 24 has no built-in v7, hence the `uuid` package. |
+| Ids are UUIDv7, generated in the backend | Ids cannot be enumerated and do not reveal row counts. Their 48-bit millisecond timestamp prefix makes new keys land near the end of the B-tree index, as integer keys do, so index pages stay full; random UUIDv4 keys land anywhere and split pages throughout. They do reveal each row's creation time, which is harmless for tasks. Generating them in the app means a whole tree's ids are known before any insert ([Inserting a tree](#inserting-a-tree)). Node 24 has no built-in v7, hence the `uuid` package. |
 | `position` column | Ids created in the same millisecond have no guaranteed order: neither the [PostgreSQL 18 `uuidv7()` docs](https://www.postgresql.org/docs/18/functions-uuid.html) nor the `uuid` README promise it, and one Save creates a whole tree within a millisecond. `position` keeps siblings in the order the form had them. |
 | No `ON DELETE` actions | Nothing is deleted (out of scope). |
 | Size | One user, tens to hundreds of rows, never deleted. `GET /api/tasks` reads every row, which is fine because pagination is out of scope. |
@@ -120,21 +120,21 @@ Seed (`002_seed.sql`): skills Frontend and Backend, and developers Alice, Bob, C
 
 All routes are under `/api`. JSON in and out. Status values on the wire are `TODO`, `IN_PROGRESS`, `BLOCKED` and `DONE`; the UI shows them as To-do, In Progress, Blocked and Done.
 
-Every list has a fixed order: top-level tasks by `id` (creation time, because each Save happens at a different moment), subtasks by `position` under their parent, and developers and skills by `name`. Without an `ORDER BY`, PostgreSQL may return an updated row in a new position, and rows would jump around after each refetch.
+Every list has a fixed order: top-level tasks by `id` (creation time, because each Save happens at a different moment), subtasks by `position` under their parent, `assignedTasks` by `id`, and every list of developers or skills, nested ones included, by `name`. Without an `ORDER BY`, PostgreSQL may return an updated row in a new position, and rows would jump around after each refetch.
 
 | Method and path | Body | Success | Errors |
 | --- | --- | --- | --- |
 | `GET /api/tasks` | — | `200 TaskNode[]`: top-level tasks with nested `subtasks` | — |
-| `GET /api/tasks/:id` | — | `200 TaskNode` with its subtree and `parentId` | `404 TASK_NOT_FOUND` |
-| `POST /api/tasks` | `NewTask` (tree) | `201 TaskNode` (created tree) | `400 VALIDATION_ERROR` (also an unknown skill or developer id), `400 NESTING_TOO_DEEP`, `400 ASSIGNEE_WITHOUT_USER_SKILLS`, `409 ASSIGNEE_LACKS_SKILLS` |
-| `PUT /api/tasks/:id/status` | `{ "status": "DONE" }` | `200 StatusChange` | `404 TASK_NOT_FOUND`, `409 SUBTASKS_NOT_DONE` |
+| `GET /api/tasks/:id` | — | `200 TaskNode` with its subtree | `400 VALIDATION_ERROR`, `404 TASK_NOT_FOUND` |
+| `POST /api/tasks` | `NewTask` (tree) | `201 TaskNode` (created tree) | `400 VALIDATION_ERROR` (also an unknown skill or developer id), `400 NESTING_TOO_DEEP`, `400 TREE_TOO_LARGE`, `413` (body over 64 KiB), `400 ASSIGNEE_WITHOUT_USER_SKILLS`, `409 ASSIGNEE_LACKS_SKILLS` |
+| `PUT /api/tasks/:id/status` | `{ "status": "DONE" }` | `200 StatusChange` | `400 VALIDATION_ERROR` (malformed id, or a status not in the list), `404 TASK_NOT_FOUND`, `409 SUBTASKS_NOT_DONE` |
 | `PUT /api/tasks/:id/assignee` | `{ "developerId": "<uuid>" }` or `{ "developerId": null }` | `200 TaskNode` | `404 TASK_NOT_FOUND`, `400 VALIDATION_ERROR` (unknown developer), `409 TASK_HAS_NO_SKILLS`, `409 ASSIGNEE_LACKS_SKILLS` |
 | `PUT /api/tasks/:id/skills` | `{ "skillIds": ["<uuid>", "<uuid>"], "unassignIfUnqualified"?: true }` | `200 TaskNode` (`skillSource` becomes `USER`; assignee cleared if the flag was needed) | `404 TASK_NOT_FOUND`, `400 VALIDATION_ERROR` (empty list or unknown skill), `409 SKILL_EDIT_BREAKS_ASSIGNMENT` (`details`: the assignee and the skills they lack) |
 | `GET /api/developers` | — | `200 Developer[]` | — |
-| `GET /api/developers/:id` | — | `200 Developer` plus `assignedTasks: TaskRef[]` | `404 DEVELOPER_NOT_FOUND` |
+| `GET /api/developers/:id` | — | `200 Developer` plus `assignedTasks: TaskRef[]` | `400 VALIDATION_ERROR`, `404 DEVELOPER_NOT_FOUND` |
 | `GET /api/skills` | — | `200 Skill[]` | — |
-| `GET /api/skills/:id` | — | `200 Skill` plus `developers: { id, name }[]` | `404 SKILL_NOT_FOUND` |
-| `GET /api/meta` | — | `200 { maxDepth: 3, statuses: Status[] }` | — |
+| `GET /api/skills/:id` | — | `200 Skill` plus `developers: { id, name }[]` | `400 VALIDATION_ERROR`, `404 SKILL_NOT_FOUND` |
+| `GET /api/meta` | — | `200 { maxDepth: 3, maxTreeSize: 50, statuses: Status[] }` | — |
 | `GET /api/health` | — | `200 { ok: true }` after `SELECT 1` | `503` when the database does not answer |
 
 Shapes:
@@ -156,16 +156,31 @@ type NewTask = {                  // validated by a recursive zod schema
   title: string;                  // trimmed, 1..500 chars
   skillIds?: Id[];                // empty or absent: the LLM identifies skills
   assigneeId?: Id;                // allowed only with a non-empty skillIds
-  subtasks?: NewTask[];           // array order becomes position; depth > maxDepth: NESTING_TOO_DEEP
+  subtasks?: NewTask[];           // array order becomes position; depth > maxDepth: NESTING_TOO_DEEP;
+                                  // more than maxTreeSize tasks in the whole tree: TREE_TOO_LARGE
 };
-type ApiError = { error: { code: string; message: string; details?: unknown } };
+type ErrorBody = { error: { code: string; message: string; requestId: string; details?: unknown } };
+// details by code: SKILL_EDIT_BREAKS_ASSIGNMENT → { assignee: { id, name }, missingSkills: string[] }
+//                  create errors about one node  → { path: number[] }  (indexes into subtasks, from the top-level task)
 ```
 
 Every id in a path or a body must be a well-formed UUID, checked by zod. So `/api/tasks/abc` gets `400 VALIDATION_ERROR` instead of reaching SQL, where PostgreSQL would reject the cast and the client would get a 500. `skillIds` are de-duplicated before use, so a repeated id cannot break the `task_skill` primary key.
 
-Separate endpoints for status, assignee and skills keep each one's validation and errors simple. A `400` is a request rejected on its own content, before any stored task is read. A `409` breaks a rule that depends on stored state. The `message` names the rule and the facts behind it. On create, it also names the task's title, so the form can point at the bad node. For example: "Bob cannot take 'Avatar UI': it requires Frontend, which Bob lacks."
+Separate endpoints for status, assignee and skills keep each one's validation and errors simple. A `400` is invalid input: a malformed body or id, an id that does not exist (skill or developer), or a tree that breaks a create-time rule. A `409` breaks a rule that depends on the stored task. Checks run in this order: request shape, then the task (`404`), then referenced ids (`400`), then rules (`409`). The `message` names the rule and the facts behind it, for example "Bob cannot take 'Avatar UI': it requires Frontend, which Bob lacks." On create, `details.path` points at the node, because titles need not be unique.
 
 The form hides "Add Subtask" at `maxDepth`, read from `GET /api/meta`, so the nesting limit is one setting in `backend/src/limits.json` ([Subtasks](requirement.md#subtasks)).
+
+**Input limits.** Every input has an upper bound, so an oversized request gets a clear `4xx` instead of breaking something downstream:
+
+| Input | Limit | Why | Response |
+| --- | --- | --- | --- |
+| Request body | 64 KiB (Fastify `bodyLimit`) | Bounds everything below before parsing, including how deeply a body can nest, which would otherwise overflow the recursive validation | `413` |
+| Tasks in one tree | `maxTreeSize`, 50 | Keeps each per-depth `INSERT` far below PostgreSQL's 65,535 bind-parameter limit, `position` within `smallint`, and the LLM batch small | `400 TREE_TOO_LARGE` |
+| Nesting | `maxDepth`, 3 | The requirement's limit | `400 NESTING_TOO_DEEP` |
+| Title | 1 to 500 characters after trimming | Keeps rows and LLM prompts small | `400 VALIDATION_ERROR` |
+| `skillIds` per task | at most the number of skills, after de-duplication | A longer list must contain duplicates or unknown ids | `400 VALIDATION_ERROR` |
+
+The tree is counted and its depth checked by walking the parsed body before zod validates it, so the cheap checks reject first.
 
 ### Write paths
 
@@ -180,7 +195,7 @@ SELECT id FROM developer WHERE id = $dev FOR SHARE;    -- 3rd lock (assign, skil
 
 After the root lock, every other writer in the tree is waiting. Plain reads of subtasks and ancestors are therefore consistent under `READ COMMITTED`.
 
-The developer lock covers the other side of the assignment rule: the developer's skills. Nothing in the app writes `developer_skill` today, so the lock changes no current behaviour. It stops correctness from resting on that unwritten fact. Any future developer-skill edit must take `FOR UPDATE` on the developer row, which then waits for in-flight assignments, and they wait for it. `FOR SHARE` does not block other `FOR SHARE` holders, so assignments to one developer in different trees still run in parallel. The order is always root, then task, then developer, so it adds no deadlock path.
+The developer lock covers the other side of the assignment rule: the developer's skills. Nothing in the app writes `developer_skill` today, so the lock changes no current behaviour. Without it, the assignment rule would hold only because developer skills never change. Any future developer-skill edit must take `FOR UPDATE` on the developer row. That edit then waits for assignments in progress, and new assignments wait for the edit. `FOR SHARE` does not block other `FOR SHARE` holders, so assignments to one developer in different trees still run in parallel. The order is always root, then task, then developer, so it adds no deadlock path.
 
 | Operation | Checks, in order (all in `rules.ts`, pure functions) | Writes |
 | --- | --- | --- |
@@ -209,7 +224,7 @@ sequenceDiagram
     API-->>UI: 201 created tree
 ```
 
-1. Validate everything that can fail before the LLM call: shape, id ranges and de-duplication, depth, that skill and developer ids exist, assignee-without-skills, and assignee qualification. An invalid request then never spends an LLM call.
+1. Validate everything that can fail before the LLM call: shape, id format and de-duplication, depth, tree size, that skill and developer ids exist, assignee-without-skills, and assignee qualification. An invalid request then never spends an LLM call.
 2. If any node has no `skillIds`, make one identification call for all of them ([LLM integration](#llm-integration)).
 3. Open one transaction. Lock each named assignee with `FOR SHARE` and re-check their qualification, as on the write paths. Then insert the tree as described below with `skill_source` set to `USER`, `LLM` or `FAILED`, and commit. The new task rows are invisible to others until commit, so they need no lock.
 
@@ -286,13 +301,13 @@ flowchart LR
 | **No key configured** | The app starts normally. Each identification fails at once, and those tasks are saved as `FAILED`. | Anyone can run the whole app without a key, and the failed-state path is exercised. |
 | **Model: `gemini-3.5-flash-lite`** (set by `GEMINI_MODEL`) | Google's smallest current stable model. `gemini-3.6-flash` is one step up if accuracy is poor. | Picking between two skills is an easy task. A small model is faster and has looser free-tier limits. The brief's three examples are checked in one live smoke test before each release. |
 | **Endpoint: `generateContent`, called with `fetch`, no SDK** | Google's long-standing endpoint. Google calls it legacy but "fully supported". | The newer Interactions API changed shape in May 2026 ([migration guide](https://ai.google.dev/gemini-api/docs/interactions-breaking-changes-may-2026)). One endpoint does not justify an SDK. `fetch` with `AbortSignal.timeout` gives exact control over the time limit. |
-| **Thinking: `MINIMAL`** | Current Gemini models write hidden reasoning ("thinking tokens") before answering. That takes time, and 3.6 Flash defaults to `medium`. | Classifying into two labels needs little reasoning. Minimal thinking keeps Save fast. |
+| **Thinking: `MINIMAL`** | Current Gemini models write hidden reasoning ("thinking tokens") before answering. That takes time. Setting `MINIMAL` explicitly fixes the level whatever the model's default is. | Classifying into two labels needs little reasoning. Minimal thinking keeps Save fast. |
 | **Structured output** (`responseMimeType: application/json`, `responseJsonSchema` with `enum: ["Frontend","Backend"]`) | The model is constrained to emit JSON matching the schema, with skill names drawn only from the enum. | The model cannot invent a skill or write prose. The backend still validates with zod, because Google says the values can be well-formed yet wrong ([structured output](https://aistudio.google.com/docs/structured-output)). |
 | **One prompt file, `backend/src/llm/prompt.json`** | It holds the literal request parts: the full `systemInstruction` text and the whole `generationConfig`, with the schema, enum and thinking level. The Gemini adapter sends it unchanged and adds only the titles. At startup the API checks the schema enum against the `skill` table, and refuses to start otherwise. | The prompt is data, readable and reviewable in one place, and the enum cannot drift from the `skill` table. Adding skills is out of scope, so reading them from the table would buy nothing. |
 | **One batched call per Save** | All skill-less titles go in one request as a JSON array, and results come back keyed by array `index`. | A 7-task tree costs one round trip, not seven. That keeps the free-tier request count low. Indexes are shorter and safer to match than echoed titles. |
 | **Titles are data** | The system instruction says the titles are data, never instructions. | A title is user text and could try prompt injection ("ignore the rules…"). The model has no tools and no data access, and its output is limited to the enum. The worst case is a wrong label, which a user can fix on the Task List page. |
 | **No few-shot examples** (no worked examples in the prompt) | The prompt defines each skill instead. | The brief's three examples are the only accuracy check. Putting them in the prompt would make that check meaningless. If accuracy is poor, add *different* examples. |
-| **Temperature not set** | Temperature controls randomness. Google says it is ignored on 3.6 Flash and newer. | Answers can vary between runs. That is acceptable because every answer is validated and users can edit it. |
+| **Temperature not set** | Temperature controls randomness. The model's default applies. | Answers can vary between runs. That is acceptable because every answer is validated and users can edit it. |
 
 ### Result mapping
 
@@ -331,10 +346,10 @@ Cost: one call per Save that has skill-less tasks, and none otherwise.
 
 What that means here:
 
-- **A demo is safe on the daily limit.** A demo with 30 Saves uses at most 30 of about 500 requests. The automated tests stub `fetch` and never call Gemini.
+- **Normal use is safe on the daily limit.** A session with 30 Saves uses at most 30 of about 500 requests. The automated tests stub `fetch` and never call Gemini.
 - **The per-minute limit is the real risk.** Several people saving at once could exceed about 10 a minute. The immediate retry would likely hit the same 429, so those tasks save as "Skills needed". The app keeps working, and the README explains that state.
 - **Development use eats the same daily quota** if it shares the project. So a key that is shared comes from a **dedicated project** used for nothing else.
-- **Before a demo, or before sharing the key,** read the real limits for that project in AI Studio's rate-limit page, and check that its usage today is low.
+- **Before a busy session, or before sharing the key,** read the real limits for that project in AI Studio's rate-limit page, and check that its usage today is low.
 
 When a quota is hit, Gemini answers `429 RESOURCE_EXHAUSTED`. The adapter logs it at `warn` with the status, so a 429 is easy to tell apart from a real failure.
 
@@ -349,18 +364,21 @@ Each attempt is cut off after `LLM_TIMEOUT_MS`, which defaults to **10 000 ms**,
 frontend/src/
   main.tsx              QueryClientProvider + RouterProvider
   App.tsx               layout + nav; routes "/" → TaskListPage, "/tasks/new" → TaskCreatePage
-  api/client.ts         fetch wrapper; throws ApiError(code, message) from the error body
+  api/client.ts         fetch wrapper; throws RequestError(status, code, message, details, requestId)
   api/types.ts          mirrors the API shapes above
   api/queries.ts        TanStack Query hooks: useTasks, useDevelopers, useSkills, mutations
   pages/TaskListPage.tsx
   components/TaskTable.tsx      table head + rows
+  components/Notice.tsx         reopened banner and error banner
+  components/ConfirmDialog.tsx  the skill-edit confirm
   components/TaskRow.tsx        recursive: renders a row, then its subtasks when expanded
   components/StatusSelect.tsx   Done disabled with a reason while subtasks are unfinished
   components/AssigneeSelect.tsx only qualifying developers + "Unassigned"; disabled with no skills
   components/SkillEditor.tsx    pick skills; FAILED shows as "Skills needed" with a prompt; confirm dialog opened by the backend's 409
   pages/TaskCreatePage.tsx
-  create/draft.ts               pure tree reducer: add subtask, remove, update field (unit-tested)
-  create/TaskDraftEditor.tsx    recursive form node; "Add Subtask" hidden at maxDepth
+  lib/rules.ts                  pure: qualifying developers, Done allowed, progress count (unit-tested)
+  create/draft.ts               pure tree reducer: add subtask, remove, update field, clear assignee (unit-tested)
+  create/TaskDraftEditor.tsx    recursive form node; "Add Subtask" hidden at maxDepth, disabled at maxTreeSize
 ```
 
 ```mermaid
@@ -369,12 +387,37 @@ flowchart TB
     TaskRow --> StatusSelect & AssigneeSelect & SkillEditor
     TaskRow -->|subtasks| TaskRow
     App --> TaskCreatePage --> TaskDraftEditor
-    TaskDraftEditor -->|children| TaskDraftEditor
+    TaskDraftEditor -->|subtasks| TaskDraftEditor
 ```
 
-- **Server state** lives in TanStack Query. After any mutation, the `tasks` query is invalidated and refetched. The server is the only truth, so derived fields such as "2/3 done" and `reopened` resets show correctly without client-side bookkeeping.
-- **Errors:** a `409` shows its `message` inline on the row and the dropdown snaps back. The `reopened` list shows as a notice, for example "Profile update moved back to In Progress."
-- **Qualifying developers** are computed on the client from `useDevelopers()`: each developer's skill ids must include every task skill id. This is a convenience only; the backend is the guard.
+### Task List page
+
+```text
+Tasks                                                                   [ + New task ]
+┌──────────────────────────────────────────────────────────────────────────────────────┐
+│ ⓘ Profile update moved back to In Progress.                                    [×]   │  ← reopened notice
+└──────────────────────────────────────────────────────────────────────────────────────┘
+  Task                          Skills                         Status          Assignee
+▾ Profile update   1/2 done     Frontend, Backend  ✎  (LLM)    [In Progress▾]  [Carol ▾]
+    Can't be Done: 1 subtask not Done (Profile API)
+  ▸ Avatar UI      1/1 done     Frontend  ✎  (user)            [Done ▾]        [Alice ▾]
+    Profile API                 Skills needed  [Pick skills]   [To-do ▾]       [— ▾] (disabled)
+  Write onboarding docs         Skills needed  [Pick skills]   [To-do ▾]       [— ▾] (disabled)
+```
+
+| Element | Behaviour | Data |
+| --- | --- | --- |
+| ▾ / ▸ toggle | Shown on rows with subtasks. Every row starts expanded. Expansion is kept in page state by task id, so a refetch does not collapse rows. | `subtasks` |
+| "1/2 done" | Counts **direct** subtasks only, matching the Done rule | `subtasks[].status` |
+| Skills cell | Skill names sorted by name, then the source: "(user)" or "(LLM)". A task with source `FAILED` shows "Skills needed" and a "Pick skills" button. ✎ opens the skill editor. | `skills`, `skillSource` |
+| Status dropdown | Lists every status from `GET /api/meta`. Done is disabled while any direct subtask is not Done, and a line under the row names those subtasks. | `statuses`, `subtasks` |
+| Assignee dropdown | Lists "Unassigned" plus the developers who have every task skill. It is disabled with "Pick skills first" when the task has no skills. | `useDevelopers()`, `skills` |
+| Reopened notice | After a status change returns a non-empty `reopened`, one dismissible banner at the top lists them, for example "Profile update moved back to In Progress." It stays until dismissed or the next change. | `StatusChange.reopened` |
+
+The qualifying-developer filter and the Done-disable check are frontend conveniences. The backend is the guard.
+
+**Skill editor.** ✎ or "Pick skills" opens a popover with one checkbox per skill (from `GET /api/skills`), plus Save and Cancel. Save is disabled while no box is ticked. Cancel closes it and discards the change. Save works as follows:
+
 - **Skill edits that break the assignment:** the backend decides, and the frontend shows its answer. Save sends the edit without the flag. If the assignee still qualifies, it returns `200` and that is the only call. If not, it returns `409 SKILL_EDIT_BREAKS_ASSIGNMENT` with the assignee and the skills they lack. The frontend turns that into "Alice lacks Backend. Save and unassign Alice?". Confirm resends with `unassignIfUnqualified: true`, and Cancel saves nothing. The frontend never repeats the rule itself, so the backend stays the only source of truth.
 
 ```text
@@ -382,10 +425,57 @@ PUT /skills { skillIds }                 ← the real save
  ├─ assignee qualifies ─▶ 200 (one call)
  └─ assignee lacks one ─▶ 409, details { assignee: Alice, missingSkills: [Backend] }
         dialog ─▶ Confirm ─▶ PUT /skills { skillIds, unassignIfUnqualified: true } ─▶ 200
-               └▶ Cancel  ─▶ nothing saved
+               └▶ Cancel  ─▶ nothing saved; the editor stays open with the draft
 ```
-- **Create form state** is one `useReducer` tree of `{ key, title, skillIds, assigneeId, children }`. Recursive components render it. Depth comes from the path. "Add Subtask" is hidden at `maxDepth`, read from `GET /api/meta`. While Save is in flight, the page shows "Saving — identifying skills…", because the LLM wait can take seconds.
-- **Styling** is plain CSS, with no component library. Two pages do not justify one.
+
+```text
+┌ Change skills? ─────────────────────────────────┐
+│ Alice lacks Backend.                            │
+│ Saving will unassign Alice from this task.      │
+│                    [ Cancel ]  [ Save and unassign ] │
+└─────────────────────────────────────────────────┘
+```
+
+### Task Creation page
+
+```text
+Create Task(s)
+┌───────────────────────────────────────────────────────────────────────────┐
+│ Title [ Profile update                          ]                         │
+│ Skills ☑ Frontend ☑ Backend    Assignee [ Carol ▾ ]    [ Add Subtask ]    │
+│   ┌───────────────────────────────────────────────────────────────────┐   │
+│   │ Title [ Avatar UI                    ]                     [ × ]  │   │
+│   │ Skills ☐ Frontend ☐ Backend   Assignee [ — ▾ ] (pick skills first)│   │
+│   │ No skills picked: they will be identified when you save.          │   │
+│   │                                           [ Add Subtask ]         │   │
+│   └───────────────────────────────────────────────────────────────────┘   │
+└───────────────────────────────────────────────────────────────────────────┘
+                                                [ Cancel ]  [ Save ]
+```
+
+- **Form state** is one `useReducer` tree of `{ key, title, skillIds, assigneeId, subtasks }`, the same field names as the API. Recursive `TaskDraftEditor` components render it. Depth comes from the path.
+- **Add Subtask** is hidden at `maxDepth`, and disabled with "Limit of 50 tasks reached" once the tree has `maxTreeSize` tasks. **×** removes a subtask and everything under it; the top-level task has no ×.
+- **Assignee** reuses the qualifying filter. Changing a node's skills clears its assignee if they no longer qualify, and clearing all skills clears it too. This avoids a Save that the backend would reject.
+- **Save** is disabled until `GET /api/meta` and the developer list have loaded, and while any title is empty. While the request runs, the button reads "Saving — identifying skills…", because the LLM wait can take up to 20 s.
+- **On success** (`201`), the page goes to the Task List and briefly highlights the new tree, so the identified skills, or "Skills needed", are visible at once.
+- **On error**, the draft is kept. A banner above Save shows the message. When `details.path` is present (the indexes into `subtasks` from the top-level task, for example `[0, 1]`), the matching node gets a red outline. For a `500`, a network error or an nginx `504`, the banner says the save failed and shows the request id.
+
+### Page states and errors
+
+| State | Task List | Task Creation |
+| --- | --- | --- |
+| Loading | "Loading tasks…" in place of the table | Form shown; Save disabled until meta and developers load |
+| Empty | "No tasks yet." with a link to Create Task | — |
+| Fetch failed | "Couldn't load tasks." with a Retry button | Banner with Retry; Save disabled |
+| Change in flight | That row's control is disabled; others stay usable | Save disabled, "Saving — identifying skills…" |
+| `409 SKILL_EDIT_BREAKS_ASSIGNMENT` | Opens the confirm dialog | — |
+| Any other `400` or `409` | The control reverts, and the message shows under the row until the next change on that row | Banner plus node outline; draft kept |
+| `404 TASK_NOT_FOUND` | Message under the row; the list refetches | — |
+| `500`, network error, `504` | Banner "Something went wrong (request id …)"; the control reverts | Same banner; draft kept |
+
+Error handling switches on `code`: `SKILL_EDIT_BREAKS_ASSIGNMENT` goes to the dialog, and every other error goes to the row or the banner. Every successful change invalidates the `tasks` query, so the list refetches from the server, which stays the only truth.
+
+**Styling** is plain CSS, with no component library. Two pages do not justify one. Status values show as To-do, In Progress, Blocked and Done.
 
 ## Observability
 
@@ -398,6 +488,7 @@ The API writes structured JSON logs to stdout with pino, Fastify's built-in logg
 | Unexpected error (`500`) | `error` | request id, stack trace | What broke? The client gets only a generic message and the request id. |
 | Write that changed state | `info` | task ids, old and new value, `reopened` ids, unassigned developer | Who changed what, for example which ancestors a reopen reset |
 | LLM attempt | `info`; `warn` on 429 or timeout; `error` on 400/401/403/404 | attempt number, model, outcome, latency ms, HTTP status, `error.status`, title count, usage (below), `requestsToday` | Is 10 s right? Is the quota running out? Is the key broken? |
+| Startup | `info` / `error` | config summary, key present yes/no, skill-enum check result | Did the app start with what it needs? |
 
 LLM usage fields, copied from the reply's `usageMetadata` on every successful attempt:
 
@@ -408,8 +499,7 @@ LLM usage fields, copied from the reply's `usageMetadata` on every successful at
 | `thoughtsTokenCount` | Hidden reasoning tokens. It should stay near 0 with thinking set to `MINIMAL`; a rise means the setting is not taking effect. |
 | `totalTokenCount` | Counts against the per-minute token limit |
 
-`requestsToday` is an in-process count of Gemini requests since midnight UTC, including retries and failed attempts. It shows how much of the roughly 500-a-day quota this instance has used, for example `requestsToday: 37` during a demo. It resets on restart and does not see other users of the same Google project, so AI Studio's usage page stays the authoritative number. Google's own reset time for the daily quota is not checked.
-| Startup | `info` / `error` | config summary, key present yes/no, skill-enum check result | Did the app start with what it needs? |
+`requestsToday` is an in-process count of Gemini requests since midnight UTC, including retries and failed attempts. It shows how much of the roughly 500-a-day quota this instance has used, for example `requestsToday: 37` after a busy hour. It resets on restart, its UTC day may not match Google's quota day, and it does not see other users of the same Google project. AI Studio's usage page is the authoritative number.
 
 Rules for what never gets logged:
 
@@ -422,8 +512,6 @@ Rules for what never gets logged:
 `LOG_LEVEL` (default `info`) sets the level.
 
 ## Tech stack and why
-
-This table is written to be lifted into the README.
 
 | Layer | Choice | Why this over the alternative |
 | --- | --- | --- |
@@ -444,10 +532,10 @@ This table is written to be lifted into the README.
 | Layer | What | How |
 | --- | --- | --- |
 | Rules | Assignment (every skill, no-skill task), Done rule, reopen walk, depth limit, skill edit vs assignee (rejected without the flag, unassigned with it, flag ignored when the assignee qualifies) | Vitest unit tests on the pure functions in `rules.ts` |
-| API | Every endpoint and error code; create with nested tree; duplicate and malformed ids; rollback on invalid tree; subtasks returned in form order (`position`) | `app.inject` against a real PostgreSQL. Each test file loads `db/init` into a fresh schema |
-| Tree lock | Deterministic. A test client opens a transaction and takes `FOR UPDATE` on the root. Then an assign request is fired, and the test checks it is waiting on a lock (`pg_stat_activity.wait_event_type = 'Lock'`). Then a skill edit is started, the client commits, and the test checks that exactly one of the two requests got a `409`. | Real PostgreSQL. A timing-based test would pass with the lock removed |
+| API | Every endpoint and error code; create with nested tree; each input limit at its edge (50 tasks accepted, 51 rejected; a body over 64 KiB gets `413`); duplicate and malformed ids; rollback on invalid tree; subtasks returned in form order (`position`) | `app.inject` against a real PostgreSQL. Each test file loads `db/init` into a fresh schema |
+| Tree lock | Deterministic, on a parent with one Done child. A test client opens a transaction and takes `FOR UPDATE` on the root. It then fires "parent → Done" and "child → To-do", which touch different rows, and checks both wait on a lock (`pg_stat_activity.wait_event_type = 'Lock'`). After the client commits, the test checks the parent never ends Done above an unfinished child. Only the root lock serialises these two, so removing it fails the test. | Real PostgreSQL. A timing-based test would pass with the lock removed |
 | LLM handling | The mapping and retry rules above: unknown names, missing, duplicate and out-of-range indexes, empty list, blocked prompt, non-`STOP`, bad JSON, timeout then retry, 400/401/403/404 not retried, no key. Fields are pinned against hand-written fixtures | The fake `SkillIdentifier` plus a stubbed `fetch` for the Gemini adapter. No network |
-| Frontend | The `draft.ts` reducer: depth limit, add and remove | Vitest |
+| Frontend | `draft.ts`: depth limit, add and remove, assignee cleared on a skill change. `lib/rules.ts`: qualifying developers, Done allowed, progress count. `SkillEditor`: a `409 SKILL_EDIT_BREAKS_ASSIGNMENT` opens the dialog, Confirm resends with the flag, and Cancel sends nothing. | Vitest; the component test stubs the API client |
 
 ## Risks and assumptions
 
@@ -458,17 +546,17 @@ This table is written to be lifted into the README.
 | Slow LLM on Save | The synchronous call makes Save wait while Gemini answers. | The wait is capped at 20 s, and the tasks are saved even when the LLM fails. If logged latencies show Save is slow, the background-job follow-up moves identification off the Save path. |
 | Free-tier rate limits | Several people saving at once can hit `429` ([Free-tier quota](#free-tier-quota)). Those tasks show "Skills needed", which can look like a broken feature. | The README explains the state, and a person can pick the skills. A shared key comes from a dedicated project. |
 | Frontend types drift from the backend | The frontend's API types are written by hand, so a backend change can break the UI unnoticed. | API tests pin the backend shapes. Generating the types from the zod schemas is a follow-up. |
-| No migration tool | A schema change needs a fresh database. | There is one schema version today. A migration tool is the first follow-up if the schema changes. |
+| No migration tool | A schema change needs a fresh database. | There is one schema version today. A migration tool is listed as a follow-up for when the schema changes. |
 | Mixed reads | A `GET` reads tasks, skills and assignees in separate statements under `READ COMMITTED`, so it could combine two committed states. | Accepted: with a single user the window is negligible. |
 
 ### Assumptions
 
-Each assumption below is one the design depends on, with how it was checked and what would confirm it.
+The design relies on these facts about external services. Each has a basis and a signal that would show it no longer holds.
 
-| Assumption | Checked by | Confirmed by |
+| Assumption | Basis | Signal |
 | --- | --- | --- |
-| `gemini-3.5-flash-lite` accepts `thinkingConfig.thinkingLevel: MINIMAL` and `responseJsonSchema` on `generateContent` | Google's model and API reference pages, 2026-11-09 | The live smoke test with the brief's three titles |
-| A typical tree, under about 15 skill-less titles, gets an answer within 10 s on the free tier | Not measured | The per-attempt latency log |
-| The free tier allows enough requests for development and demos | Third-party reports ([Free-tier quota](#free-tier-quota)) | The project's limits in AI Studio |
+| `gemini-3.5-flash-lite` accepts `thinkingConfig.thinkingLevel: MINIMAL` and `responseJsonSchema` on `generateContent` | Google's model and API reference pages, 2026-11-09 | The live smoke test with the brief's three titles before each release |
+| A typical tree, under about 15 skill-less titles, gets an answer within 10 s on the free tier | Typical response times of small models | The per-attempt latency log |
+| The free tier allows enough requests for development and normal use | Third-party reports ([Free-tier quota](#free-tier-quota)) | The project's limits in AI Studio |
 | A key from a project with no billing account cannot be charged | Google's published tier model | The project shows "Free tier" in AI Studio |
 | The compose file works with both `docker compose` and the legacy `docker-compose` binary | Uses no features newer than the legacy binary supports | Running both binaries |
