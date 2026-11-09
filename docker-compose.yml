@@ -1,4 +1,4 @@
-# Runs the stack: PostgreSQL with schema and seed data, and the API. See docs/design.md → Overview.
+# Runs the stack: PostgreSQL with schema and seed data, the API, and the web app (nginx). See docs/design.md → Overview.
 # Works with `docker compose` and the legacy `docker-compose`; no feature newer than the legacy binary is used.
 # Values come from .env when present (copy .env.example); a missing .env is not an error.
 # The schema and seed load only on the first start of an empty volume: `docker compose down -v` resets the data.
@@ -38,6 +38,21 @@ services:
       - "127.0.0.1:${API_PORT:-3000}:3000"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    # Open http://localhost:8080 (WEB_PORT).
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
       interval: 5s
       timeout: 3s
       retries: 12
