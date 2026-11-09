@@ -42,8 +42,8 @@ services:
       timeout: 3s
       retries: 12
 
-  # Database for the backend tests only: `docker compose --profile test up -d test-db`, then `npm test` in
-  # backend/. Each test file creates its own schema, so this starts empty. Its data lives in memory and
+  # Database for the backend tests only; the commands, including the wait for it to accept connections, are in
+  # README.md → Tests. Each test file creates its own schema, so this starts empty. Its data lives in memory and
   # disappears when it stops. Profiles need docker-compose 1.28 or later.
   test-db:
     image: postgres:17-alpine
