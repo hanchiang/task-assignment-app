@@ -1,0 +1,59 @@
+# Runs the stack: PostgreSQL with schema and seed data, and the API. See docs/design.md → Overview.
+# Works with `docker compose` and the legacy `docker-compose`; no feature newer than the legacy binary is used.
+# Values come from .env when present (copy .env.example); a missing .env is not an error.
+# The schema and seed load only on the first start of an empty volume: `docker compose down -v` resets the data.
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: taskapp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-taskapp}
+      POSTGRES_DB: taskapp
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # -h 127.0.0.1: during init the image runs a socket-only server, which a bare pg_isready reports as ready.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "taskapp", "-d", "taskapp"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://taskapp:${POSTGRES_PASSWORD:-taskapp}@db:5432/taskapp
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash-lite}
+      LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-10000}
+    # Published on localhost only, for direct API access.
+    ports:
+      - "127.0.0.1:${API_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Database for the backend tests only: `docker compose --profile test up -d test-db`, then `npm test` in
+  # backend/. Each test file creates its own schema, so this starts empty. Its data lives in memory and
+  # disappears when it stops. Profiles need docker-compose 1.28 or later.
+  test-db:
+    image: postgres:17-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_PASSWORD: test
+    ports:
+      - "127.0.0.1:55433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+
+volumes:
+  db-data:
