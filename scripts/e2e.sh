@@ -6,6 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 export API_PORT="${E2E_API_PORT:-3100}"
+# Overrides any key in .env (the shell wins over .env in compose), so the flows never call Gemini or spend quota.
+export GEMINI_API_KEY=""
 # One project per port, so runs on different ports never share, or delete, each other's containers.
 compose=(docker compose -p "taskapp-e2e-$API_PORT")
 down=("${compose[@]}" down -v --rmi local --remove-orphans)

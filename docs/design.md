@@ -4,7 +4,7 @@ This is how the app in [requirement.md](requirement.md) gets built.
 It is a three-container stack: React and Vite served by nginx, a Fastify API, and PostgreSQL.
 Every business rule lives in one backend service layer, which runs inside a transaction that locks the task tree.
 Skill identification is one batched Gemini call, made before the save transaction opens.
-Each LLM attempt has a fixed 10 s [time limit](#time-limit), with one retry.
+Each LLM attempt has a 20 s [time limit](#time-limit) by default, and a failed attempt is retried once unless it was an HTTP 400, 401, 403 or 404.
 
 Requirement decisions are not repeated here. Each section links to the rule it implements.
 
@@ -22,7 +22,7 @@ flowchart LR
 
 | Container | Image | Role |
 | --- | --- | --- |
-| `web` | `nginx:alpine` (built by `node:24-alpine`) | Serves the built SPA and proxies `/api` to `api`, so the browser sees one origin and no CORS is needed. Unknown paths fall back to `index.html` (`try_files $uri /index.html`), so reloading `/tasks/new` works. `proxy_read_timeout 60s` is set explicitly, above the worst-case Save wait of 20 s ([time limit](#time-limit)). |
+| `web` | `nginx:alpine` (built by `node:24-alpine`) | Serves the built SPA and proxies `/api` to `api`, so the browser sees one origin and no CORS is needed. Unknown paths fall back to `index.html` (`try_files $uri /index.html`), so reloading `/tasks/new` works. `proxy_read_timeout 60s` is set explicitly, above the worst-case Save wait of 40 s at the default and 50 s at the cap ([time limit](#time-limit)). |
 | `api` | `node:24-alpine` | REST API, business rules, LLM client. Starts after `db` passes its health check. Its own health check calls `GET /api/health`. |
 | `db` | `postgres:17-alpine` | Schema and seed data, loaded from `db/init/*.sql` on first start. The health check is `pg_isready -h 127.0.0.1`: during init the image runs a socket-only server, which a bare `pg_isready` would report as ready. |
 
@@ -32,19 +32,21 @@ Repository layout:
 db/init/            001_schema.sql, 002_seed.sql   (mounted into postgres; also run by API tests)
 backend/src/
   app.ts            builds the Fastify instance (tests use app.inject, no network)
-  server.ts         entry point: config, listen
+  server.ts         entry point: config, pick the skill identifier, startup skill check, listen
   config.ts         env parsing with zod (DATABASE_URL, GEMINI_API_KEY, LLM_TIMEOUT_MS, ...)
   limits.json       { maxDepth: 3, maxTreeSize: 50 }; read by the API, and by the frontend via GET /api/meta
   db.ts             withTransaction(fn) + withTreeLock(taskId, fn): the only way to change an existing task; TxClient type
   errors.ts         AppError(code, httpStatus, message) + Fastify error handler
   validation.ts     id format (UUID, lowercased) + zod parse → VALIDATION_ERROR, shared by every feature
-  tasks/            routes.ts, schemas.ts (zod), service.ts (transactions), rules.ts (pure), repo.ts (SQL)
+  tasks/            routes.ts, schemas.ts (zod), service.ts (transactions; maps LLM skill names, sets LLM or FAILED), rules.ts (pure), repo.ts (SQL)
   developers/       routes.ts, repo.ts
   skills/           routes.ts, repo.ts
-  llm/              prompt.json (system instruction + generationConfig), skillIdentifier.ts (interface + result mapping), gemini.ts (to be added), fake.ts
-backend/test/       rules.test.ts (unit), api.test.ts (real Postgres), llm.test.ts (response handling)
+  llm/              prompt.json (system instruction + generationConfig), skillIdentifier.ts (interface + unavailableIdentifier), gemini.ts (request, retry, reply parsed by index), skillCheck.ts (startup enum check), fake.ts
+backend/test/       rules.test.ts (unit), api.test.ts (real Postgres), llm.test.ts (response handling),
+                    e2e.test.ts (over HTTP, run by scripts/e2e.sh),
+                    txclient.typecheck.ts (compile-time check), db.ts (test database helper)
 frontend/src/       see frontend.md
-scripts/            pre-commit (key guard; install once per clone)
+scripts/            pre-commit (key guard; install once per clone), e2e.sh (end-to-end check)
 docs/               requirement.md, design.md (this file), frontend.md
 docker-compose.yml  .env.example  README.md
 ```
@@ -83,7 +85,7 @@ In the backend, when one feature calls another's code, it imports that feature's
 | Layers inside each backend feature | `routes.ts` parses ids and request bodies. The create body is the exception: `service.ts` parses it, after the cheap size and depth checks. `service.ts` owns transactions and locks. `rules.ts` holds pure functions, unit-tested without a database. `repo.ts` holds the feature's SQL. This keeps the separation a layered design gives, without a folder per layer. |
 | Transaction and lock helpers in `db.ts` | `withTransaction`, `withTreeLock` and `lockDeveloper` are the SQL outside the `repo.ts` files, with the health check's `SELECT 1`. They sit in one shared place so that every write path takes its locks in the same order ([Write paths](#write-paths)). |
 | No service file in `developers/` or `skills/` | Both only read data. A service would only pass calls through; one is added when a write path appears. |
-| One interface only at the LLM boundary | `SkillIdentifier` is implemented by `unavailableIdentifier` (no key configured), the test fake, and the Gemini adapter (`gemini.ts`, to be added). The entities need no such interface, because each has one database implementation. |
+| One interface only at the LLM boundary | `SkillIdentifier` is implemented by `unavailableIdentifier` (no key configured), the test fake, and the Gemini adapter (`gemini.ts`). The entities need no such interface, because each has one database implementation. |
 | Frontend: feature folders plus shared folders, imports one way | This is the structure [Bulletproof React](https://github.com/alan2207/bulletproof-react/blob/master/docs/project-structure.md) recommends. Its rule is that "the features can only import from shared parts and the app can import from features and shared parts." |
 
 Alternatives considered:
@@ -269,7 +271,7 @@ sequenceDiagram
     API->>API: validate shape, depth, ids exist, assignee rules
     API->>DB: read developer skills (no transaction)
     alt some nodes have no skillIds
-        API->>LLM: one call with every skill-less title (10 s limit, retry once)
+        API->>LLM: one call with every skill-less title (20 s limit, at most 2 attempts)
         LLM-->>API: skills per title, or failure
     end
     API->>DB: BEGIN, insert whole tree, COMMIT
@@ -349,7 +351,7 @@ flowchart LR
 
 | Choice | What it means | Why |
 | --- | --- | --- |
-| **Provider: Gemini only, free-tier key** | The brief names Gemini and its free API. Behind one `SkillIdentifier` interface, whose other implementation is the fake used in tests. | The key may be shared with people who run the app. A key whose Google project has **no billing account** stays on the free tier and cannot run up a bill. Before sharing it, check in AI Studio that the key's project shows "Free tier". |
+| **Provider: Gemini only, free-tier key** | The brief names Gemini and its free API. Behind one `SkillIdentifier` interface, whose other implementations are `unavailableIdentifier` (no key) and the test fake. | The key may be shared with people who run the app. A key whose Google project has **no billing account** stays on the free tier and cannot run up a bill. Before sharing it, check in AI Studio that the key's project shows "Free tier". |
 | **Key never committed** | The key lives only in `.env`. Git ignores `.env*` and `*.env`, except `.env.example`, which holds an empty value. Compose passes it in by `${GEMINI_API_KEY:-}`. A pre-commit hook rejects any staged line matching `AIza[0-9A-Za-z_-]{35}` (Gemini's key format). It is tracked as `scripts/pre-commit` and installed once per clone with `cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit`. | The key is shared only outside the repository. The hook catches a key pasted into a tracked file. Before the repository is published, `git log -p --all \| grep -cE 'AIza[0-9A-Za-z_-]{35}'` must print 0. The full pattern matters, because the bare prefix also appears in this doc and in the hook. |
 | **No key configured** | The app starts normally. Each identification fails at once, and those tasks are saved as `FAILED`. | Anyone can run the whole app without a key, and the failed-state path is exercised. |
 | **Model: `gemini-3.5-flash-lite`** (set by `GEMINI_MODEL`) | Google's smallest current stable model. `gemini-3.6-flash` is one step up if accuracy is poor. | Picking between two skills is an easy task. A small model is faster and has looser free-tier limits. The brief's three examples are checked in one live smoke test before each release. |
@@ -383,7 +385,7 @@ Response fields read, from the [generateContent reference](https://aistudio.goog
 | `candidates[0].content.parts[].text` | The JSON answer (parts joined) | documented only |
 | `candidates[0].finishReason` | Anything other than `STOP` fails the attempt | documented only |
 | `promptFeedback.blockReason` (no `candidates`) | Logged; the attempt fails | documented only |
-| `usageMetadata` | Logged token counts | documented only |
+| `usageMetadata` (`promptTokenCount`, `candidatesTokenCount`, `thoughtsTokenCount`, `totalTokenCount`) | Logged token counts | documented only |
 | `error.status` (on HTTP errors) | Logged; the free-text `error.message` is not logged, because it can name the Cloud project | documented only |
 
 Cost: one call per Save that has skill-less tasks, and none otherwise.
@@ -408,7 +410,9 @@ When a quota is hit, Gemini answers `429 RESOURCE_EXHAUSTED`. The adapter logs i
 
 ### Time limit
 
-Each attempt is cut off after `LLM_TIMEOUT_MS`, which defaults to **10 000 ms**, with one retry. So Save waits at most 20 s for the LLM, under nginx's 60 s proxy timeout. The value is a fixed default, not measured, chosen to keep the first version simple. Each attempt logs its latency, so real Saves show whether 10 s is too generous or too tight, and the setting changes without code.
+Each attempt is cut off after `LLM_TIMEOUT_MS`, which defaults to **20 000 ms**, and a failed attempt is retried once under the [retry rule](#result-mapping). So Save waits at most 40 s for the LLM at the default. The setting is capped at 25 000 ms, so two attempts (50 s) always finish inside nginx's 60 s proxy timeout; a larger value stops the API at startup.
+
+The default comes from four live Saves with `gemini-3.5-flash-lite`. The first call after the API starts took 9.3 s in one run. In another it hit a 10 s limit and its retry took 8.0 s. Later calls took 1.1 s and 0.7 s. Why the first call is slow is not established: it may be connection setup from inside Docker, or a slow first answer from Gemini. A 10 s limit made that first Save time out, retry and take 18 s. A 20 s limit should let it finish in one attempt; no live Save has been run at 20 s yet. Each attempt logs its latency, so real Saves show whether the default needs to change, and the setting changes without code.
 
 ## Frontend structure
 
@@ -425,7 +429,7 @@ The API writes structured JSON logs to stdout with pino, Fastify's built-in logg
 | Rule rejection (`400`, `409`) | `info` | request id, error code, task id | Which rule blocked a user? |
 | Unexpected error (`500`) | `error` | request id, stack trace | What broke? The client gets only a generic message and the request id. |
 | Write that changed state | `info` | task ids, old and new value, `reopened` ids, unassigned developer | Who changed what, for example which ancestors a reopen reset |
-| LLM attempt | `info`; `warn` on 429 or timeout; `error` on 400/401/403/404 | attempt number, model, outcome, latency ms, HTTP status, `error.status`, title count, usage (below), `requestsToday` | Is 10 s right? Is the quota running out? Is the key broken? |
+| LLM attempt | `info` on success; `error` on 400/401/403/404; `warn` on any other failure, 429 and timeout included | attempt number, model, outcome, latency ms, HTTP status, `error.status`, title count, usage (below), `requestsToday` | Is 20 s right? Is the quota running out? Is the key broken? |
 | Startup | `info` / `error` | config summary, key present yes/no, skill-enum check result | Did the app start with what it needs? |
 
 LLM usage fields, copied from the reply's `usageMetadata` on every successful attempt:
@@ -482,7 +486,7 @@ Rules for what never gets logged:
 
 | Risk | Effect | Mitigation |
 | --- | --- | --- |
-| Slow LLM on Save | The synchronous call makes Save wait while Gemini answers. | The wait is capped at 20 s, and the tasks are saved even when the LLM fails. If logged latencies show Save is slow, the background-job follow-up moves identification off the Save path. |
+| Slow LLM on Save | The synchronous call makes Save wait while Gemini answers. | The wait is capped at twice `LLM_TIMEOUT_MS`: 40 s at the default, 50 s at the setting's cap. Two later Saves took about 1 s. The first after the API starts took 9.3 s, or 18 s when a 10 s limit forced a retry. The tasks are saved even when the LLM fails. If logged latencies show Save is slow, the background-job follow-up moves identification off the Save path. |
 | Free-tier rate limits | Several people saving at once can hit `429` ([Free-tier quota](#free-tier-quota)). Those tasks show "Skills needed", which can look like a broken feature. | The README explains the state, and a person can pick the skills. A shared key comes from a dedicated project. |
 | Frontend types drift from the backend | The frontend's API types are written by hand, so a backend change can break the UI unnoticed. | API tests pin the backend shapes. Generating the types from the zod schemas is a follow-up. |
 | No migration tool | A schema change needs a fresh database. | There is one schema version today. A migration tool is listed as a follow-up for when the schema changes. |
@@ -495,7 +499,7 @@ The design relies on these facts about external services. Each has a basis and a
 | Assumption | Basis | Signal |
 | --- | --- | --- |
 | `gemini-3.5-flash-lite` accepts `thinkingConfig.thinkingLevel: MINIMAL` and `responseJsonSchema` on `generateContent` | Google's model and API reference pages, 2026-11-09 | The live smoke test with the brief's three titles before each release |
-| A typical tree, under about 15 skill-less titles, gets an answer within 10 s on the free tier | Typical response times of small models | The per-attempt latency log |
+| A typical tree, under about 15 skill-less titles, gets an answer within 20 s on the free tier | Four live Saves of 3 titles: the first call after the API starts took 9.3 s, and over 10 s in another run (cut off); later calls about 1 s | The per-attempt latency log |
 | The free tier allows enough requests for development and normal use | Third-party reports ([Free-tier quota](#free-tier-quota)) | The project's limits in AI Studio |
 | A key from a project with no billing account cannot be charged | Google's published tier model | The project shows "Free tier" in AI Studio |
 | The compose file works with both `docker compose` and the legacy `docker-compose` binary | Uses no features newer than the legacy binary supports | Running both binaries |

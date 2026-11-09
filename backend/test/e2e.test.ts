@@ -73,7 +73,8 @@ describe.skipIf(!BASE)("end to end", () => {
     expect(list.body.map((t: TaskNode) => t.id)).toContain(root.id);
   });
 
-  it("saves a task given no skills as FAILED, since no skill identifier is connected", async () => {
+  // scripts/e2e.sh starts the API with an empty GEMINI_API_KEY, so identification fails at once.
+  it("saves a task given no skills as FAILED when no Gemini key is set", async () => {
     const created = await call("POST", "/api/tasks", { title: "Write release notes" });
     expect(created).toMatchObject({ status: 201, body: { skillSource: "FAILED", skills: [] } });
   });

@@ -15,7 +15,7 @@ Docker Compose runs the PostgreSQL database, loaded with the schema and seed dat
 
 Configuration comes from a `.env` file next to `docker-compose.yml`. Copy `.env.example` to start one. Every value is optional.
 
-No skill identifier is connected to the API. A task saved without skills gets `"skillSource": "FAILED"`, and a person sets its skills with `PUT /api/tasks/:id/skills`.
+With `GEMINI_API_KEY` set, the API asks Gemini for the skills of each task saved without any. With no key, or when Gemini fails, the task is saved with `"skillSource": "FAILED"`, and a person sets its skills with `PUT /api/tasks/:id/skills`.
 
 For example, list the seeded developers and create a task with a subtask:
 

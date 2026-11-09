@@ -29,7 +29,7 @@ What the app does, mixing the brief with this solution's decisions:
 | Assignment | A task can go only to a developer who has every skill the task requires. |
 | Status | Tasks move between To-do, In Progress, Blocked and Done. A task can be Done only when all its subtasks are Done. |
 | Subtasks | A task can have subtasks, up to 3 levels in total. |
-| Skill identification | When a task is saved without skills, an LLM identifies them before the save completes. If the LLM fails, the task is still saved and a user picks its skills. |
+| Skill identification | When a task is saved without skills, an LLM identifies them before the save completes. If the LLM fails or names no skill, the task is still saved and a user picks its skills. |
 | Pages | A Task List page to assign and update tasks, and a Task Creation page to build a task with its subtasks. |
 | Packaging | The full stack runs with docker-compose. |
 
@@ -122,9 +122,9 @@ Two other decisions support these rules: new tasks start as To-do (see Status), 
 
 - When a task or subtask is created without user-specified skills, the backend uses an LLM, through its API, to identify the skills from the task title. The user does not need to trigger this from the frontend.
 - **Decision:** this happens while the Save request is open. The backend sends every title in the tree that has no skills to the LLM in one call, then saves the whole tree with the results in one transaction. The LLM call finishes before that transaction opens, so no database lock is held while waiting.
-- **Decision:** creating a task never fails because of the LLM. Each attempt has a time limit, and a timeout or a transient error is retried once, so Save waits at most twice the limit. An error that means the request or key is wrong is not retried. If both attempts fail, those tasks are saved with their skills marked **failed**.
+- **Decision:** creating a task never fails because of the LLM. Each attempt has a time limit, and a failed attempt is retried once, unless the error means the request, key or model is wrong, so Save waits at most twice the limit. If both attempts fail, those tasks are saved with their skills marked **failed**.
 - **Decision:** the LLM may only choose from the existing skills, and any other name is ignored. A task the answer leaves out, or for which it names no existing skill, is marked failed.
-- **Decision:** the time limit defaults to 10 seconds and is set by configuration. It is a chosen default, not a measured one, to keep the first version simple. Each attempt's response time is logged. If the wait on Save becomes a bottleneck, identification can move to a background job (see Possible follow-ups).
+- **Decision:** the time limit defaults to 20 seconds and is set by configuration. The default comes from four live Saves. The first call after the API starts took 9.3 seconds in one run. In another, a 10-second limit cut it off and the retry took 8 seconds. Later calls took about 1 second. Each attempt's response time is logged. If the wait on Save becomes a bottleneck, identification can move to a background job (see Possible follow-ups).
 - **Decision:** the brief says skills "will be automatically generated". The failed state is a deliberate departure from that: when the LLM cannot help, a person picks the skills (see Editing skills).
 
 When a task is saved, its skills end up in one of three states:

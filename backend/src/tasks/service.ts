@@ -124,7 +124,7 @@ export class TaskService {
       // provider free text or a title.
       let answers: (string[] | null)[];
       try {
-        answers = await identifier.identify(pending.map((n) => n.title));
+        answers = await identifier.identify(pending.map((n) => n.title), log);
       } catch (err) {
         log.error({ errorName: (err as Error)?.name, titleCount: pending.length }, "skill identifier failed; saving those tasks as FAILED");
         answers = [];

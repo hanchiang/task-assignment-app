@@ -8,7 +8,10 @@ const ConfigSchema = z.object({
   // Empty means no key: every identification fails at once and tasks save as FAILED.
   GEMINI_API_KEY: z.string().default(""),
   GEMINI_MODEL: z.string().min(1).default("gemini-3.5-flash-lite"),
-  LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  // Capped so both attempts together (2 × 25 000 ms) finish inside nginx's proxy_read_timeout
+  // (frontend/nginx.conf); test/config.test.ts checks this. prefault, unlike default, runs the
+  // default through max(), so a default above the cap also fails at startup.
+  LLM_TIMEOUT_MS: z.coerce.number().int().positive().max(25_000).prefault(20_000),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
