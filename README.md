@@ -1,35 +1,34 @@
 # Task Assignment App
 
-A web app that assigns tasks to developers by skill and tracks each task's status through nested subtasks.
-When a task is saved without skills, the backend asks an LLM (Google Gemini) to identify them from the title.
+A web app that assigns tasks to developers by skill and tracks status through nested subtasks.
+When a task is saved without skills, the backend asks Google Gemini to identify them from the title.
 
-The full requirements are in [docs/requirement.md](docs/requirement.md), the system design in [docs/design.md](docs/design.md), and the frontend design in [docs/frontend.md](docs/frontend.md).
-This README is the entry point and summarises each of them.
+Details: [requirements](docs/requirement.md), [system design](docs/design.md), [frontend design](docs/frontend.md).
 
 ## What it does
 
 | Capability | Effect |
 | --- | --- |
-| Task List page | Lists every task with its subtasks indented under it. Each row has its own status and assignee dropdown and a skill editor. |
-| Task Creation page | One form builds a task and up to two levels of subtasks below it (3 levels in total), and saves the whole tree at once. |
-| Assignment rule | A task can go only to a developer who has every skill it requires. The assignee dropdown lists only those developers, and the backend rejects any other. |
-| Done rule | A task can be Done only when all its subtasks are Done. Reopening a subtask moves the Done tasks above it back to In Progress. |
-| Skill identification | A task saved without skills gets them from Gemini in one call per Save. If no key is set, the call fails, or Gemini names no skill for a task, that task shows "Skills needed" and a person picks its skills. |
+| Task List page | Shows every task with its subtasks indented below. Each row has a status dropdown, an assignee dropdown and a skill editor. |
+| Task Creation page | Builds a task with up to two levels of subtasks and saves the whole tree at once. |
+| Assignment rule | A developer can take a task only if they have every skill it needs. |
+| Done rule | A task can be Done only when all its subtasks are Done. Reopening a subtask moves its Done ancestors back to In Progress. |
+| Skill identification | Tasks saved without skills get them from Gemini, in one call per Save. If Gemini names none or fails, the task shows "Skills needed" and a person picks its skills. |
 | Packaging | `docker compose up` runs the database with seed data, the API and the web app. |
 
-Out of scope: login, deleting tasks, editing titles, and adding developers or skills. The full list is in [docs/requirement.md → Out of scope](docs/requirement.md#out-of-scope).
+Out of scope: login, deleting tasks, editing titles, and managing developers or skills ([full list](docs/requirement.md#out-of-scope)).
 
 ### What it looks like
 
-The Task List. "(LLM)" marks skills Gemini identified on Save. "Plan the team offsite" got no skill on Save, so it waits for a person to pick one.
+The Task List. "(LLM)" marks skills Gemini identified. "Plan the team offsite" got no skill, so a person picks one.
 
 ![Task List with a three-level task tree](docs/images/task-list.png)
 
-Changing a task's skills so that its assignee no longer qualifies asks before unassigning them.
+A skill change that leaves the assignee unqualified asks before unassigning them.
 
 ![Confirm dialog: Alice lacks Backend](docs/images/confirm-unassign.png)
 
-Task Creation saves a task and its subtasks in one go. The subtask has no skills, so Gemini will identify them on Save.
+Task Creation. The subtask has no skills, so Gemini identifies them on Save.
 
 ![Task Creation form with one subtask](docs/images/create-task.png)
 
@@ -44,34 +43,36 @@ cp .env.example .env        # optional: every value has a default
 docker compose up --build -d
 ```
 
-Open http://localhost:8080. The database starts with four developers (Alice, Bob, Carol, Dave) and two skills (Frontend, Backend), and no tasks.
+Open http://localhost:8080. The database starts with four developers (Alice, Bob, Carol, Dave), two skills (Frontend, Backend) and no tasks, loaded from `db/init/*.sql` on first start.
 
 | Goal | Command |
 | --- | --- |
 | Check the API is up | `curl localhost:3000/api/health` (or your `API_PORT`) returns `{"ok":true}` |
-| Inspect the database | `psql postgres://taskapp:taskapp@127.0.0.1:15432/taskapp` (or your `DB_PORT` and `POSTGRES_PASSWORD`). Without a local psql: `docker compose exec db psql -U taskapp taskapp`. Use it to read only: a write here skips the backend's rules, such as the allowed statuses ([requirement.md → Out of scope](docs/requirement.md#out-of-scope)). |
+| Inspect the database (read only) | `psql postgres://taskapp:taskapp@127.0.0.1:15432/taskapp` (or your `DB_PORT` and `POSTGRES_PASSWORD`), or `docker compose exec db psql -U taskapp taskapp` |
 | Read the API's logs | `docker compose logs api` |
 | Stop | `docker compose down` |
-| Reset all data to the seed | `docker compose down -v`, then start again. This deletes every task. |
+| Reset all data to the seed | `docker compose down -v`, then start again |
 
-Running without a Gemini key spends nothing and sends nothing outside your machine. Tasks saved without skills then show "Skills needed", and you pick their skills on the Task List page.
+Writes made directly in the database skip the backend's rules; guarding against them is [out of scope](docs/requirement.md#out-of-scope).
 
 ### Settings
 
-Settings come from a `.env` file next to `docker-compose.yml`. Copy `.env.example` to start one; a missing `.env` is not an error.
+Settings come from `.env` next to `docker-compose.yml`; a missing `.env` is not an error.
 
-| Key | What it does | Example | If missing or wrong |
+| Key | What it does | Default | If missing or wrong |
 | --- | --- | --- | --- |
-| `GEMINI_API_KEY` | Turns on skill identification | From https://aistudio.google.com/apikey | Missing: tasks without skills save as "Skills needed". Wrong: Gemini refuses each call, the API logs it at `error`, and the tasks save the same way. |
-| `GEMINI_MODEL` | Gemini model used | `gemini-3.5-flash-lite` (default) | An unknown model fails each call, logged at `error`; tasks save as "Skills needed". |
-| `LLM_TIMEOUT_MS` | Time limit for each Gemini attempt; a failed attempt is retried once, unless it was an HTTP 400, 401, 403 or 404 | `20000` (default) | Not a whole number from 1 to 25000: the API refuses to start. The cap keeps two attempts inside nginx's 60 s proxy timeout. |
-| `LOG_LEVEL` | API log level | `info` (default) | Not a pino level: the API refuses to start. |
-| `WEB_PORT` | Host port for the web app | `8080` (default) | Port taken: the `web` container fails to start. |
-| `API_PORT` | Host port for direct API access | `3000` (default) | Port taken: the `api` container fails to start, so the web app does not start either. |
-| `DB_PORT` | Host port for a database client | `15432` (default) | Port taken: the `db` container fails to start, so the API and web app do not start either. |
-| `POSTGRES_PASSWORD` | Database password, applied when the data volume is first created | `taskapp` (default) | Use letters and digits only, because it goes unencoded into the API's database URL. Changed after the first start, or holding a character that breaks a URL (such as `#`, `/`, `?` or `%`): the API cannot connect, refuses to start, and Compose keeps restarting it (`docker compose logs api` shows why). To change it, run `docker compose down -v`, which deletes all data. |
+| `GEMINI_API_KEY` | Turns on skill identification; get one at https://aistudio.google.com/apikey | (empty) | Tasks without skills save as "Skills needed". A wrong key fails each call, logged at `error`, and those tasks save the same way. |
+| `GEMINI_MODEL` | Gemini model | `gemini-3.5-flash-lite` | An unknown model fails each call, logged at `error`. |
+| `LLM_TIMEOUT_MS` | Time limit per Gemini attempt | `20000` | Not a whole number from 1 to 25000: the API refuses to start. |
+| `LOG_LEVEL` | API log level | `info` | Not a pino level: the API refuses to start. |
+| `WEB_PORT` | Host port for the web app | `8080` | Port taken: `web` fails to start. |
+| `API_PORT` | Host port for the API | `3000` | Port taken: `api` fails to start, so `web` does not start either. |
+| `DB_PORT` | Host port for a database client | `15432` | Port taken: `db` fails to start, so `api` and `web` do not start either. |
+| `POSTGRES_PASSWORD` | Database password | `taskapp` | Letters and digits only: it goes unencoded into the API's database URL. Applied only when the data volume is created. A character that breaks a URL (such as `#`, `/`, `?` or `%`), or a change after the volume exists, makes the API refuse to start. To change it, run `docker compose down -v` (deletes all data). |
 
-Use a Gemini key from a Google Cloud project with no billing account, so it stays on the free tier and cannot be charged. The free tier allows roughly 10 to 15 requests a minute; past that, Saves show "Skills needed" until the minute passes.
+When the API refuses to start, Compose keeps restarting it and the web app never comes up; `docker compose logs api` shows why.
+
+Without a key, the app spends nothing and sends nothing off your machine. With one, use a key from a Google Cloud project with no billing account, so it stays on the free tier. That tier allows roughly 10 to 15 requests a minute; past that, Saves show "Skills needed" until the minute passes.
 
 ## System design
 
@@ -83,23 +84,17 @@ flowchart LR
     api -->|1 call per Save| llm[Gemini API]
 ```
 
-| Container | Role |
-| --- | --- |
-| `web` | nginx serves the built React app and forwards `/api` to the API, so the browser talks to one address and needs no CORS. |
-| `api` | The REST API. It owns every business rule and the Gemini call. It starts only after the database is healthy. |
-| `db` | PostgreSQL, loaded from `db/init/*.sql` on first start. |
+nginx serves the React app and forwards `/api`, so the browser sees one origin and needs no CORS.
 
 ### Where the rules live
 
-The backend enforces every business rule, and the database guards only data integrity.
+| Layer | Enforces |
+| --- | --- |
+| Backend (`backend/src/tasks/rules.ts`, run by `service.ts`) | Every business rule: assignment, Done and reopening, allowed statuses, 3 levels, 50 tasks per tree. A broken rule returns an error naming it, such as "Bob cannot take 'Avatar UI': it requires Frontend, and Bob lacks Frontend." |
+| Database (`db/init/001_schema.sql`) | Data integrity only: references exist, required fields are set, and a task has at most one parent and one assignee. |
+| Frontend | Nothing it relies on. Hiding choices the backend would reject is a convenience. |
 
-| Layer | Enforces | Why |
-| --- | --- | --- |
-| Backend (`backend/src/tasks/rules.ts`, run by `service.ts`) | The assignment rule, the Done rule and reopening, the allowed statuses, the 3-level nesting limit, the 50-task tree limit | A broken rule returns an error that names it, for example "Bob cannot take 'Avatar UI': it requires Frontend, and Bob lacks Frontend." Changing a rule needs no database migration. |
-| Database (`db/init/001_schema.sql`) | Rows point at rows that exist, required fields are present, a task has at most one parent and one assignee | These hold whatever code writes the data. |
-| Frontend | Nothing it relies on | It lists only qualifying developers and hides "Add Subtask" at the depth limit, as conveniences. The backend's answer is always what the page shows. |
-
-Every change to a task runs in one database transaction that locks the top-level task of its tree first. So two changes to one tree run one after another. For example, marking a parent Done while its subtask is reopened cannot leave a Done task above an unfinished one.
+Every change runs in one transaction that first locks the top-level task of its tree. So two changes to one tree run one after the other, and a Done task can never end up above an unfinished subtask.
 
 ### Saving a task
 
@@ -119,7 +114,11 @@ sequenceDiagram
     API-->>UI: 201 with the created tree
 ```
 
-Gemini is called before the transaction opens, so no database lock is held while waiting. Gemini may only answer with skill names that exist, enforced by a JSON schema on the request and checked again on the reply. The API refuses to start if the skill names in `backend/src/llm/prompt.json` differ from the `skill` table; Compose then keeps restarting it, and `docker compose logs api` shows why. The full LLM design, including the retry rule and what is logged, is in [docs/design.md → LLM integration](docs/design.md#llm-integration).
+- Gemini is called before the transaction, so no database lock or connection is held while waiting.
+- A JSON schema limits Gemini's answer to existing skill names, and the reply is checked again.
+- The API refuses to start if the skill names in `backend/src/llm/prompt.json` differ from the `skill` table; `docker compose logs api` shows why.
+
+Retries, logging and limits: [design.md → LLM integration](docs/design.md#llm-integration).
 
 ### Data model
 
@@ -133,69 +132,69 @@ erDiagram
     task |o--o{ task : "parent_id"
 ```
 
-A subtask is a `task` row with a `parent_id`. Every task also stores `root_id`, its tree's top-level task, which the transaction locks. `skill_source` records where a task's skills came from: `USER`, `LLM`, or `FAILED` (shown as "Skills needed"). The schema and the reason for each column are in [docs/design.md → Schema](docs/design.md#schema).
+A subtask is a `task` row with a `parent_id`. `root_id` names the tree's top-level task, the row the transaction locks. `skill_source` is `USER`, `LLM` or `FAILED` ("Skills needed"). Column-by-column reasons: [design.md → Schema](docs/design.md#schema).
 
 ## API
 
-All routes are under `/api` and use JSON. Errors have the shape `{ "error": { "code", "message", "requestId", "details"? } }`, except `GET /api/health`, which answers `503 {"ok":false}`.
+Routes are under `/api` and use JSON. Errors look like `{ "error": { "code", "message", "requestId", "details"? } }`.
 
 | Method and path | Does |
 | --- | --- |
-| `GET /api/tasks` | List all tasks, with subtasks nested |
-| `GET /api/tasks/:id` | Read one task with its subtree |
+| `GET /api/tasks` | List all tasks, subtasks nested |
+| `GET /api/tasks/:id` | One task with its subtree |
 | `POST /api/tasks` | Create a task with its subtasks |
-| `PUT /api/tasks/:id/status` | Change the status; the reply lists any Done ancestors moved back to In Progress |
-| `PUT /api/tasks/:id/assignee` | Assign a qualified developer, or unassign with `null` |
-| `PUT /api/tasks/:id/skills` | Replace the skills; `unassignIfUnqualified: true` confirms unassigning a developer who no longer qualifies |
-| `GET /api/developers`, `GET /api/developers/:id` | List developers, or read one with their skills and assigned tasks |
-| `GET /api/skills`, `GET /api/skills/:id` | List skills, or read one |
-| `GET /api/meta` | The limits and statuses the frontend uses |
-| `GET /api/health` | `200` when the database answers, else `503` |
+| `PUT /api/tasks/:id/status` | Change status; the reply lists Done ancestors moved back to In Progress |
+| `PUT /api/tasks/:id/assignee` | Assign a qualified developer, or `null` to unassign |
+| `PUT /api/tasks/:id/skills` | Replace skills; `unassignIfUnqualified: true` confirms unassigning |
+| `GET /api/developers[/:id]` | Developers, or one with skills and assigned tasks |
+| `GET /api/skills[/:id]` | Skills, or one |
+| `GET /api/meta` | Limits and statuses for the frontend |
+| `GET /api/health` | `200 {"ok":true}`, or `503 {"ok":false}` when the database is down |
 
-For example, create a task with a subtask whose skills Gemini will identify (without a key, Avatar UI saves as "Skills needed"):
+Example: a task with a subtask whose skills Gemini will identify.
 
 ```sh
 curl -X POST localhost:3000/api/tasks -H 'content-type: application/json' \
   -d '{"title":"Profile update","skillIds":["01a1bd9a-c800-7000-8000-000000000001"],"subtasks":[{"title":"Avatar UI"}]}'
 ```
 
-Every request body, reply shape and error code is in [docs/design.md → API contract](docs/design.md#api-contract).
+Full contract: [design.md → API contract](docs/design.md#api-contract).
 
 ## Libraries and why
 
-| Layer | Choice | Why this over the alternative |
+| Layer | Choice | Why |
 | --- | --- | --- |
-| Frontend build | Vite, React 19, TypeScript | The standard toolchain for a React single-page app. Next.js adds server rendering that two pages do not need. |
-| Routing | React Router | Two client routes; the common choice. |
-| Server data | TanStack Query | Caching, refetch after each change, and loading and error states, without hand-written fetch effects. |
+| Frontend | Vite, React 19, TypeScript | Standard for a single-page app; two pages need no server rendering. |
+| Routing | React Router | Two client routes. |
+| Server data | TanStack Query | Caching, refetch after changes, loading and error states. |
 | Styling | Plain CSS | Two pages do not justify a component library. |
-| Backend | Fastify 5, TypeScript | Built-in structured logging (pino) and in-process request tests. Express would need extra packages for both. |
-| Validation | zod | One schema gives runtime checks and TypeScript types, including the recursive task tree. |
-| Database access | `pg` with plain SQL | The row locks taken in a fixed order are the core of the design; plain SQL keeps them visible, where an ORM would hide them. |
-| Ids | `uuid` (version 7) | Ids generated in the app, so a whole tree is inserted in one statement. Node has no built-in version 7. |
-| LLM | Gemini `generateContent` via `fetch` | One endpoint does not justify an SDK, and `fetch` gives exact control over the time limit. |
-| Tests | Vitest, Testing Library, jsdom | One test runner for both halves. API tests run against a real PostgreSQL. |
-| Lint | ESLint with `eslint-plugin-import` | Rejects a frontend feature importing another feature, and shared code importing a feature. |
-| Packaging | Docker Compose, nginx, PostgreSQL 17 | One command runs everything. The compose file also works with the legacy `docker-compose`. |
+| Backend | Fastify 5, TypeScript | Built-in structured logging and in-process request tests. |
+| Validation | zod | One schema gives runtime checks and types, including the recursive tree. |
+| Database access | `pg`, plain SQL | The fixed lock order is the core of the design; an ORM would hide it. |
+| Ids | `uuid` (version 7) | Generated in the app, so a whole tree inserts in one statement; Node has no built-in version 7. |
+| LLM | Gemini via `fetch` | One endpoint needs no SDK, and `fetch` gives exact control of the time limit. |
+| Tests | Vitest, Testing Library, jsdom | One runner for both halves; API tests use a real PostgreSQL. |
+| Lint | ESLint, `eslint-plugin-import` | Stops frontend features importing each other, and shared code importing a feature. |
+| Packaging | Docker Compose, nginx, PostgreSQL 17 | One command runs everything. |
 
-Every dependency version is pinned exactly in `backend/package.json` and `frontend/package.json`.
+Versions are pinned exactly in each `package.json`.
 
 ## Tests
 
-The backend tests run against a real PostgreSQL. Compose starts one for them on port 55433, separate from the app's database:
+Backend tests need a PostgreSQL; Compose starts one on port 55433, separate from the app's:
 
 ```sh
 docker compose --profile test up -d test-db
 until docker compose exec -T test-db pg_isready -q -h 127.0.0.1 -U postgres; do sleep 1; done
 cd backend
 npm ci
-npm test            # unit and API tests (vitest)
-npm run typecheck   # TypeScript, including the compile-time transaction check in test/txclient.typecheck.ts
+npm test            # unit and API tests
+npm run typecheck   # vitest does not check types
 ```
 
-The `until` line waits for PostgreSQL to accept connections. Run both `npm` commands: vitest does not check types. Set `TEST_DATABASE_URL` to use another PostgreSQL. No test calls Gemini; the Gemini tests use a stubbed `fetch`.
+No test calls Gemini; the Gemini tests stub `fetch`. `TEST_DATABASE_URL` points the tests at another PostgreSQL. `npm test` skips `test/e2e.test.ts`, which `scripts/e2e.sh` runs.
 
-The frontend tests need no database:
+Frontend tests need no database:
 
 ```sh
 cd frontend
@@ -203,27 +202,25 @@ npm ci --ignore-scripts
 npm test && npm run typecheck && npm run lint
 ```
 
-`npm test` in `backend/` skips `test/e2e.test.ts`, the end-to-end flows over HTTP. Run them from the repo root, after `npm ci` in `backend/`:
+End-to-end flows, from the repo root after `npm ci` in `backend/` (needs `docker compose` v2 and `curl`):
 
 ```sh
 scripts/e2e.sh
 ```
 
-It needs `docker compose` (v2) and `curl`. It builds the API and web images and starts a separate stack (compose project `taskapp-e2e-3100`, API on port 3100, web on port 8180, database on port 5532). It checks nginx's routing and cache headers, runs the flows through nginx, then deletes that stack's containers, data and built images. The app's own stack and data are not touched. It runs with no Gemini key, even when `.env` has one, so it never calls Gemini. Set `E2E_API_PORT`, `E2E_WEB_PORT` or `E2E_DB_PORT` if a port is taken; the project name follows the API port.
+It builds a separate, throwaway stack (compose project `taskapp-e2e-<API port>`; API on 3100, web on 8180, database on 5532) and runs the flows through nginx without a Gemini key, even when `.env` has one. Your own stack and data are untouched. If a port is taken, set `E2E_API_PORT`, `E2E_WEB_PORT` or `E2E_DB_PORT`.
 
 ## Changing the code
 
-For a backend that restarts on every edit, stop the compose `api` service and run the backend directly against the test database:
+To run the backend with restart-on-edit against the test database:
 
 ```sh
 docker compose stop api
 docker compose --profile test up -d test-db
 until docker compose exec -T test-db pg_isready -q -h 127.0.0.1 -U postgres; do sleep 1; done
-cat db/init/001_schema.sql db/init/002_seed.sql | docker compose exec -T test-db psql -U postgres -q
+cat db/init/001_schema.sql db/init/002_seed.sql | docker compose exec -T test-db psql -U postgres -q   # once per test-db start
 cd backend
 DATABASE_URL=postgres://postgres:test@127.0.0.1:55433/postgres npm run dev
 ```
 
-The `cat` line loads the schema and seed, because the test database starts empty. Run it once after each start of `test-db`.
-
-For the frontend, `npm run dev` in `frontend/` serves it on http://localhost:5173 with hot reload, and forwards `/api` to the API on port 3000.
+For the frontend, `npm run dev` in `frontend/` serves http://localhost:5173 with hot reload and forwards `/api` to port 3000.
