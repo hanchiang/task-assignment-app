@@ -42,6 +42,14 @@ npm run typecheck   # TypeScript, including the compile-time transaction check i
 
 The `until` line waits for PostgreSQL to accept connections. Run both `npm` commands: vitest does not check types. Set `TEST_DATABASE_URL` to use another PostgreSQL.
 
+`npm test` skips `test/e2e.test.ts`, the end-to-end flows over HTTP. Run them after each change, from the repo root, with `npm ci` done in `backend/`:
+
+```sh
+scripts/e2e.sh
+```
+
+It needs `docker compose` (v2) and `curl`. It builds the API image and starts a separate stack (compose project `taskapp-e2e-3100`, API on port 3100), runs the flows, then deletes that stack's containers, data and built image. The app's own stack and data are not touched. Set `E2E_API_PORT` if 3100 is taken; the project name follows the port.
+
 ## Changing backend code
 
 For a server that restarts on every edit, stop the compose `api` service and run the backend directly against the test database:
