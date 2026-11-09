@@ -1,0 +1,8 @@
+#!/bin/sh
+# Rejects a commit that stages a Gemini API key (AIza + 35 chars). See design.md → Key never committed.
+# Install once per clone: cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+if git diff --cached -U0 --no-color | grep -E '^\+' | grep -qE 'AIza[0-9A-Za-z_-]{35}'; then
+  echo "pre-commit: a staged line looks like a Gemini API key (AIza...). Remove it; the key belongs in .env only." >&2
+  exit 1
+fi
+exit 0

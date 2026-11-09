@@ -1,0 +1,9 @@
+my-notes.md
+ACTIVE_TASK.md
+ACTIVE_TASKS/
+.env*
+*.env
+!.env.example
+node_modules/
+dist/
+coverage/
