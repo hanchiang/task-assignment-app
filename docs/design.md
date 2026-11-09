@@ -35,18 +35,66 @@ backend/src/
   server.ts         entry point: config, listen
   config.ts         env parsing with zod (DATABASE_URL, GEMINI_API_KEY, LLM_TIMEOUT_MS, ...)
   limits.json       { maxDepth: 3, maxTreeSize: 50 }; read by the API, and by the frontend via GET /api/meta
-  db.ts             pg Pool + withTransaction(fn) + withTreeLock(taskId, fn): the only way to change an existing task
+  db.ts             withTransaction(fn) + withTreeLock(taskId, fn): the only way to change an existing task; TxClient type
   errors.ts         AppError(code, httpStatus, message) + Fastify error handler
+  validation.ts     id format (UUID, lowercased) + zod parse → VALIDATION_ERROR, shared by every feature
   tasks/            routes.ts, schemas.ts (zod), service.ts (transactions), rules.ts (pure), repo.ts (SQL)
   developers/       routes.ts, repo.ts
   skills/           routes.ts, repo.ts
-  llm/              prompt.json (system instruction + generationConfig), skillIdentifier.ts (interface + result mapping), gemini.ts, fake.ts
+  llm/              prompt.json (system instruction + generationConfig), skillIdentifier.ts (interface + result mapping), gemini.ts (to be added), fake.ts
 backend/test/       rules.test.ts (unit), api.test.ts (real Postgres), llm.test.ts (response handling)
 frontend/src/       see frontend.md
 scripts/            pre-commit (key guard; install once per clone)
 docs/               requirement.md, design.md (this file), frontend.md
 docker-compose.yml  .env.example  README.md
 ```
+
+### Code organisation
+
+Both halves of the app group code by feature: everything one entity or page needs lives in one folder, and code that every feature uses sits beside the features. Files that change together stay together, which is the colocation rule in [the legacy React docs on file structure](https://legacy.reactjs.org/docs/faq-structure.html).
+
+For example, adding "edit a task's skills" needed a route, a request schema, a service method, a rule and the SQL that replaces a task's skills. All five live in `backend/src/tasks/`. Grouped by file type, the same change would touch `controllers/`, `validators/`, `services/`, `domain/` and `repositories/`, and each of those folders would also hold developer and skill files.
+
+```mermaid
+flowchart LR
+    subgraph be["backend/src"]
+      appts["app.ts"] --> tasks["tasks/"] & developers["developers/"] & skills["skills/"]
+      tasks --> developers
+      tasks --> skills
+      developers -.->|type only| skills
+      developers -.->|type only| tasks
+      tasks -.->|type only| llm["llm/"]
+      appts -.->|type only| llm
+      tasks & developers & skills --> bshared["db, errors, validation"]
+    end
+    subgraph fe["frontend/src (planned)"]
+      app["app/"] --> list["features/task-list"] & create["features/task-create"]
+      list & create --> fshared["api, components, lib"]
+    end
+```
+
+Arrows are imports. A solid arrow imports code, and a dotted one imports only TypeScript types. To keep the diagram small, it leaves out `server.ts` and the arrows from `app.ts` to the shared modules.
+
+In the backend, when one feature calls another's code, it imports that feature's `repo.ts`. For example, the task service imports `listDevelopers` to check the assignees on a new tree. SQL is the exception: a repo query reads other features' tables directly. For example, the task tree query joins `skill` and `developer`, so one statement returns a consistent tree. A developer's assigned tasks come from a query on `task` in `developers/repo.ts`. In the frontend, features never import each other.
+
+| Choice | Why |
+| --- | --- |
+| By feature at the top level | A change stays in one folder, and a call from one feature into another shows up as a `../<feature>/` import that grep finds. |
+| Layers inside each backend feature | `routes.ts` parses ids and request bodies. The create body is the exception: `service.ts` parses it, after the cheap size and depth checks. `service.ts` owns transactions and locks. `rules.ts` holds pure functions, unit-tested without a database. `repo.ts` holds the feature's SQL. This keeps the separation a layered design gives, without a folder per layer. |
+| Transaction and lock helpers in `db.ts` | `withTransaction`, `withTreeLock` and `lockDeveloper` are the SQL outside the `repo.ts` files, with the health check's `SELECT 1`. They sit in one shared place so that every write path takes its locks in the same order ([Write paths](#write-paths)). |
+| No service file in `developers/` or `skills/` | Both only read data. A service would only pass calls through; one is added when a write path appears. |
+| One interface only at the LLM boundary | `SkillIdentifier` is implemented by `unavailableIdentifier` (no key configured), the test fake, and the Gemini adapter (`gemini.ts`, to be added). The entities need no such interface, because each has one database implementation. |
+| Frontend: feature folders plus shared folders, imports one way | This is the structure [Bulletproof React](https://github.com/alan2207/bulletproof-react/blob/master/docs/project-structure.md) recommends. Its rule is that "the features can only import from shared parts and the app can import from features and shared parts." |
+
+Alternatives considered:
+
+| Pattern | Why not here |
+| --- | --- |
+| By file type (`controllers/`, `services/`, `repositories/`, or `pages/`, `components/`) | One change spreads across folders, and nothing shows which feature depends on which. |
+| Clean or hexagonal architecture (domain, application and infrastructure folders, an interface before every external system) | It adds an interface with a single implementation for every entity. Its two useful ideas are kept where they pay: a pure rules core, and an interface at the one external system. |
+| Feature-Sliced Design (six frontend layers: app, pages, widgets, features, entities, shared) | Built for large frontends. Two pages do not need widget and entity layers. |
+
+Grouping by file type would be the better choice if the app had a single entity, or if a team split its work by layer. Neither is true here.
 
 ## Schema
 
@@ -133,7 +181,7 @@ Every list has a fixed order: top-level tasks by `id` (creation time, because ea
 | `GET /api/developers` | — | `200 Developer[]` | — |
 | `GET /api/developers/:id` | — | `200 Developer` plus `assignedTasks: TaskRef[]` | `400 VALIDATION_ERROR`, `404 DEVELOPER_NOT_FOUND` |
 | `GET /api/skills` | — | `200 Skill[]` | — |
-| `GET /api/skills/:id` | — | `200 Skill` plus `developers: { id, name }[]` | `400 VALIDATION_ERROR`, `404 SKILL_NOT_FOUND` |
+| `GET /api/skills/:id` | — | `200 Skill` | `400 VALIDATION_ERROR`, `404 SKILL_NOT_FOUND` |
 | `GET /api/meta` | — | `200 { maxDepth: 3, maxTreeSize: 50, statuses: Status[] }` | — |
 | `GET /api/health` | — | `200 { ok: true }` after `SELECT 1` | `503` when the database does not answer |
 
@@ -175,7 +223,7 @@ The form hides "Add Subtask" at `maxDepth`, read from `GET /api/meta`, so the ne
 | Input | Limit | Why | Response |
 | --- | --- | --- | --- |
 | Request body | 64 KiB (Fastify `bodyLimit`) | Bounds everything below before parsing, including how deeply a body can nest, which would otherwise overflow the recursive validation | `413` |
-| Tasks in one tree | `maxTreeSize`, 50 | Keeps each per-depth `INSERT` far below PostgreSQL's 65,535 bind-parameter limit, `position` within `smallint`, and the LLM batch small | `400 TREE_TOO_LARGE` |
+| Tasks in one tree | `maxTreeSize`, 50 | Keeps the one LLM call per Save small, because it carries every skill-less title in the tree | `400 TREE_TOO_LARGE` |
 | Nesting | `maxDepth`, 3 | The requirement's limit | `400 NESTING_TOO_DEEP` |
 | Title | 1 to 500 characters after trimming | Keeps rows and LLM prompts small | `400 VALIDATION_ERROR` |
 | `skillIds` per task | at most the number of skills, after de-duplication | A longer list must contain duplicates or unknown ids | `400 VALIDATION_ERROR` |
@@ -184,13 +232,17 @@ The tree is counted and its depth checked by walking the parsed body before zod 
 
 ### Write paths
 
-Every update runs `withTreeLock(taskId, fn)`. It locks the tree's top-level task first, then the target task, and only then calls `fn`. No write path can skip the order, because it is the only way to get a locked task. Lock order is the same for every write, so writes to one tree run one at a time and cannot deadlock ([Non-functional requirements](requirement.md#non-functional-requirements)).
+Every update runs `withTreeLock(taskId, fn)`. It locks the tree's top-level task first, then the target task, and only then calls `fn`. No write path can skip the order, because it is the only way to get a locked task. The repo's write functions (`setStatus`, `setAssignee`, `replaceSkills`, `insertTree`) and `lockDeveloper` take a `TxClient`, a type only `withTransaction` creates. A write or a row lock called on a client outside a transaction therefore fails to compile, and `test/txclient.typecheck.ts` checks each of these functions. Lock order is the same for every write, so writes to one tree run one at a time and cannot deadlock ([Non-functional requirements](requirement.md#non-functional-requirements)).
 
 ```sql
-SELECT root_id FROM task WHERE id = $1;                -- unlocked; root_id never changes. No row: TASK_NOT_FOUND
-SELECT id FROM task WHERE id = $root FOR UPDATE;       -- 1st lock: the tree
-SELECT * FROM task WHERE id = $1 FOR UPDATE;           -- 2nd lock: the target
-SELECT id FROM developer WHERE id = $dev FOR SHARE;    -- 3rd lock (assign, skill edit): the developer checked
+-- 1st lock: the tree. root_id never changes, so the subquery needs no lock. No row: TASK_NOT_FOUND
+SELECT id FROM task WHERE id = (SELECT root_id FROM task WHERE id = $1) FOR UPDATE;
+-- 2nd lock: the target
+SELECT * FROM task WHERE id = $1 FOR UPDATE;
+-- 3rd lock (assign, skill edit): the developer checked. Create takes only this lock, per named assignee.
+SELECT id, name FROM developer WHERE id = $dev FOR SHARE;
+-- then their skills, in a separate statement so it sees any skill edit that committed during the wait
+SELECT skill_id FROM developer_skill WHERE developer_id = $dev;
 ```
 
 After the root lock, every other writer in the tree is waiting. Plain reads of subtasks and ancestors are therefore consistent under `READ COMMITTED`.
@@ -230,7 +282,7 @@ sequenceDiagram
 
 #### Inserting a tree
 
-A child's `parent_id` foreign key needs its parent row to exist first. So the tree goes in level by level: parents before children. Because the backend generates the ids, the whole tree's ids are known before the first insert. Nothing has to be read back between levels.
+The whole tree goes in as one `INSERT`, in any row order. PostgreSQL checks a foreign key that is not deferrable "immediately after every command" ([`CREATE TABLE`](https://www.postgresql.org/docs/17/sql-createtable.html)), so a child's `parent_id` may name a parent that appears later in the same statement. Because the backend generates the ids, every row, parent links included, is known before the insert.
 
 Example, with made-up titles. On the Create Task page a user types "Profile update", adds two subtasks, and adds one subtask under the first of those:
 
@@ -251,18 +303,20 @@ Save sends that tree as one `POST /api/tasks` body:
 
 **Step 1, in memory.** The backend walks the form once, with no database call, and builds these rows (ids shortened to letters):
 
-| id | title | parent_id | root_id | position | depth |
-| --- | --- | --- | --- | --- | --- |
-| A | Profile update | — | A | 0 | 1 |
-| B | Avatar UI | A | A | 0 | 2 |
-| C | Crop tool | B | A | 0 | 3 |
-| D | Profile API | A | A | 1 | 2 |
+| id | title | parent_id | root_id | position |
+| --- | --- | --- | --- | --- |
+| A | Profile update | — | A | 0 |
+| B | Avatar UI | A | A | 0 |
+| C | Crop tool | B | A | 0 |
+| D | Profile API | A | A | 1 |
 
-**Step 2, insert by depth.** One multi-row `INSERT` per depth, at most 3 statements, then one `INSERT` for all `task_skill` rows:
+**Step 2, insert.** One `INSERT` for all four task rows, then one for all `task_skill` rows. Each passes one array per column, and PostgreSQL's `unnest` turns the arrays back into rows. The task statement has 7 parameters and the `task_skill` one has 2, whatever the tree size, so neither needs splitting. Splitting would also be harmful: each batch is its own statement, so a child could land in an earlier batch than its parent and fail the foreign key check.
 
-1. Depth 1: A.
-2. Depth 2: B and D. Their parent A exists.
-3. Depth 3: C. Its parent B exists.
+```sql
+INSERT INTO task (id, title, skill_source, parent_id, root_id, position, assignee_id)
+SELECT * FROM unnest($1::uuid[], $2::text[], $3::text[], $4::uuid[], $5::uuid[], $6::smallint[], $7::uuid[]);
+-- $1 = [A, B, C, D], $4 (parent_id) = [NULL, A, B, A], $6 (position) = [0, 0, 0, 1], ...
+```
 
 With database-generated ids, each level would have to be inserted and its ids read back before the next. Generating ids in the app removes those round trips.
 
@@ -271,7 +325,6 @@ With database-generated ids, each level would have to be inserted and its ids re
 | Question | Answered by | Uses id order? |
 | --- | --- | --- |
 | Who is whose parent? | `parent_id` | No |
-| Which rows are inserted first? | `depth`, computed during the walk | No |
 | Sibling order on screen | `position` | No |
 | Order of top-level tasks | `id` | Yes, but only roots are compared, and each comes from a different Save |
 

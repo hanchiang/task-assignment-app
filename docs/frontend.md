@@ -8,26 +8,32 @@ Request and response shapes are in [design.md → API contract](design.md#api-co
 
 ## Components
 
+The code is grouped by feature, one folder per page, with shared code beside it. See [design.md → Code organisation](design.md#code-organisation) for why.
+
 ```text
 frontend/src/
-  main.tsx              QueryClientProvider + RouterProvider
-  App.tsx               layout + nav; routes "/" → TaskListPage, "/tasks/new" → TaskCreatePage
-  api/client.ts         fetch wrapper; throws RequestError(status, code, message, details, requestId)
-  api/types.ts          mirrors the API shapes in design.md
-  api/queries.ts        TanStack Query hooks: useTasks, useDevelopers, useSkills, mutations
-  pages/TaskListPage.tsx
-  components/TaskTable.tsx      table head + rows
+  main.tsx                      QueryClientProvider + RouterProvider
+  app/App.tsx                   layout + nav; routes "/" → TaskListPage, "/tasks/new" → TaskCreatePage
+  api/client.ts                 fetch wrapper; throws RequestError(status, code, message, details, requestId)
+  api/types.ts                  mirrors the API shapes in design.md
+  api/queries.ts                TanStack Query hooks: useTasks, useDevelopers, useSkills, useMeta, mutations
   components/Notice.tsx         reopened banner and error banner
-  components/ConfirmDialog.tsx  the skill-edit confirm
-  components/TaskRow.tsx        recursive: renders a row, then its subtasks when expanded
-  components/StatusSelect.tsx   Done disabled with a reason while subtasks are unfinished
-  components/AssigneeSelect.tsx only qualifying developers + "Unassigned"; disabled with no skills
-  components/SkillEditor.tsx    pick skills; FAILED shows as "Skills needed" with a prompt; confirm dialog opened by the backend's 409
-  pages/TaskCreatePage.tsx
+  components/AssigneeSelect.tsx only qualifying developers + "Unassigned"; disabled with no skills (both pages)
   lib/rules.ts                  pure: qualifying developers, Done allowed, progress count (unit-tested)
-  create/draft.ts               pure tree reducer: add subtask, remove, update field, clear assignee (unit-tested)
-  create/TaskDraftEditor.tsx    recursive form node; "Add Subtask" hidden at maxDepth, disabled at maxTreeSize
+  features/task-list/
+    TaskListPage.tsx
+    TaskTable.tsx               table head + rows
+    TaskRow.tsx                 recursive: renders a row, then its subtasks when expanded
+    StatusSelect.tsx            Done disabled with a reason while subtasks are unfinished
+    SkillEditor.tsx             pick skills; FAILED shows as "Skills needed" with a prompt; confirm dialog opened by the backend's 409
+    ConfirmDialog.tsx           the skill-edit confirm
+  features/task-create/
+    TaskCreatePage.tsx
+    TaskDraftEditor.tsx         recursive form node; "Add Subtask" hidden at maxDepth, disabled at maxTreeSize
+    draft.ts                    pure tree reducer: add subtask, remove, update field, clear assignee (unit-tested)
 ```
+
+Imports go one way: `app` imports features, and features import only the shared folders (`api`, `components`, `lib`). Features never import each other, and shared code never imports a feature. An ESLint `import/no-restricted-paths` rule, added with the frontend's lint script, will enforce this, so a wrong import fails the lint instead of relying on review.
 
 ```mermaid
 flowchart TB
@@ -36,6 +42,8 @@ flowchart TB
     TaskRow -->|subtasks| TaskRow
     App --> TaskCreatePage --> TaskDraftEditor
     TaskDraftEditor -->|subtasks| TaskDraftEditor
+    TaskDraftEditor --> AssigneeSelect
+    SkillEditor --> ConfirmDialog
 ```
 
 ## Task List page
@@ -103,7 +111,7 @@ Create Task(s)
 
 - **Form state** is one `useReducer` tree of `{ key, title, skillIds, assigneeId, subtasks }`, the same field names as the API. Recursive `TaskDraftEditor` components render it. Depth comes from the path.
 - **Add Subtask** is hidden at `maxDepth` (3 levels), and disabled with "Limit of 50 tasks reached" once the tree has `maxTreeSize` (50) tasks. Both limits come from `GET /api/meta`. **×** removes a subtask and everything under it; the top-level task has no ×.
-- **Assignee** reuses the qualifying filter. Changing a node's skills clears its assignee if they no longer qualify, and clearing all skills clears it too. This avoids a Save that the backend would reject.
+- **Assignee** uses the same `AssigneeSelect` as the Task List, so it lists only qualifying developers. Changing a node's skills clears its assignee if they no longer qualify, and clearing all skills clears it too. This avoids a Save that the backend would reject.
 - **Save** is disabled until `GET /api/meta` and the developer list have loaded, and while any title is empty. While the request runs, the button reads "Saving — identifying skills…", because the LLM wait can take up to 20 s ([time limit](design.md#time-limit)).
 - **On success** (`201`), the page goes to the Task List and briefly highlights the new tree, so the identified skills, or "Skills needed", are visible at once.
 - **On error**, the draft is kept. A banner above Save shows the message. When `details.path` is present (the indexes into `subtasks` from the top-level task, for example `[0, 1]`), the matching node gets a red outline. For a `500`, a network error or an nginx `504`, the banner says the save failed and shows the request id.
